@@ -1263,7 +1263,7 @@ def create_parser() -> argparse.ArgumentParser:
     ingest_parser.add_argument(
         "--language",
         default=None,
-        choices=["python", "rust"],
+        choices=["python", "rust", "cpp", "c", "fortran", "cobol"],
         help="Force a language (otherwise inferred from file extensions)",
     )
     ingest_parser.add_argument(
