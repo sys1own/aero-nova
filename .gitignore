@@ -4,3 +4,5 @@ __pycache__/
 .pytest_cache/
 .aero/
 *.egg-info/
+.build_cache/
+.overlays/

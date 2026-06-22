@@ -163,6 +163,14 @@ def build_command(args: argparse.Namespace) -> int:
         for asset in metadata.get("applied_assets", []):
             print(f"Updated asset: {asset}")
 
+    # Overlay system: re-apply the user's committed manual edits to the freshly
+    # generated sources so they survive regeneration (blueprint stays the source
+    # of truth for architecture; overlays preserve hand-tuned logic).
+    if not getattr(args, "no_overlay", False):
+        from src.build.overlay_stage import apply_overlays_stage
+
+        apply_overlays_stage(workspace, enabled=True)
+
     # Autonomous Hardware-Polymerization: probe the host and polymorphically
     # rewrite the freshly generated sources for it, after code generation but
     # before any linking/execution.  Runs transparently with no user flags.
@@ -836,6 +844,31 @@ def _ingest_registry(args: argparse.Namespace, workspace: Path) -> int:
     return 0 if not result.errors else 1
 
 
+def commit_overlay_command(args: argparse.Namespace) -> int:
+    """Capture manual edits to a generated file as a reusable overlay patch."""
+    from src.overlay import OverlayError, OverlayManager
+
+    workspace = Path(args.workspace).resolve()
+    target = Path(args.file).resolve()
+    manager = OverlayManager(workspace)
+
+    try:
+        patch = manager.commit_overlay(target)
+    except OverlayError as exc:
+        print(f"commit-overlay failed: {exc}", file=sys.stderr)
+        return 1
+
+    key = manager.store.relkey(target)
+    if patch is None:
+        print(f"No manual edits detected in {key}; nothing to commit.")
+        return 0
+    overlay_path = manager.store.overlay_path(target)
+    line_count = sum(1 for ln in patch.splitlines() if ln[:1] in ("+", "-") and not ln.startswith(("+++", "---")))
+    print(f"Committed overlay for {key} ({line_count} changed line(s)).")
+    print(f"  saved to: {overlay_path}")
+    return 0
+
+
 def ingest_command(args: argparse.Namespace) -> int:
     """Ingest source into the AST registry, or external trees from [context]."""
     workspace = Path(args.workspace).resolve()
@@ -1152,6 +1185,7 @@ def create_parser() -> argparse.ArgumentParser:
     build_parser.add_argument("--no-evolution", action="store_true", help="Skip the self-evolution pass after building")
     build_parser.add_argument("--no-hardware-probe", action="store_true", help="Skip hardware profiling at build start")
     build_parser.add_argument("--no-polymorph", action="store_true", help="Skip autonomous hardware-polymerization of generated code")
+    build_parser.add_argument("--no-overlay", action="store_true", help="Skip re-applying committed user overlays to generated code")
     build_parser.add_argument("--runtime-feedback", action="store_true", help="Run the runtime benchmark after building")
     build_parser.add_argument("--validation-only", action="store_true", help="Skip the build; only run the validation suite")
     build_parser.add_argument(
@@ -1248,6 +1282,15 @@ def create_parser() -> argparse.ArgumentParser:
         help="List all ingested contexts in the AST registry with their semantic hashes",
     )
     ingest_parser.set_defaults(handler=ingest_command)
+
+    # --- commit-overlay ---
+    overlay_parser = subparsers.add_parser(
+        "commit-overlay",
+        help="Save manual edits to a generated file as an overlay patch (preserved across rebuilds)",
+    )
+    overlay_parser.add_argument("file", help="Path to the edited generated file")
+    overlay_parser.add_argument("--workspace", default=".", help="Workspace root")
+    overlay_parser.set_defaults(handler=commit_overlay_command)
 
     # --- invariants (semantic fluidity) ---
     invariants_parser = subparsers.add_parser(
