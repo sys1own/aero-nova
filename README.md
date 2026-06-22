@@ -39,7 +39,6 @@ By abandoning language-specific compilers and non-deterministic probabilistic mo
 
  |
 | **Structural Memoisation** | Caches builds by structural UAST configuration rather than file text hashes (whitespace or comments never trigger rebuilds).
-
  |
 
 ---
@@ -48,16 +47,13 @@ By abandoning language-specific compilers and non-deterministic probabilistic mo
 
 AeroNova normalizes all incoming code formats into a single intermediate schema before mapping relationships to the directed acyclic graph (DAG):
 
-* 
-**Metadata Block:** Evaluates file metrics, byte spans, and syntax volumes for total build tracking.
+* **Metadata Block:** Evaluates file metrics, byte spans, and syntax volumes for total build tracking.
 
 
-* 
-**Flat Node Array:** Serializes deep tree hierarchies into a linearized 1D node collection to eliminate recursive traversal performance overhead.
+* **Flat Node Array:** Serializes deep tree hierarchies into a linearized 1D node collection to eliminate recursive traversal performance overhead.
 
 
-* 
-**Node Taxonomy & Alignment:** Maps syntax constructs directly to generic definitions (e.g., matching Rust’s `pub fn`, Python’s `def`, and COBOL’s `METHOD-ID.` into a uniform functional block framework).
+* **Node Taxonomy & Alignment:** Maps syntax constructs directly to generic definitions (e.g., matching Rust’s `pub fn`, Python’s `def`, and COBOL’s `METHOD-ID.` into a uniform functional block framework).
 
 
 
@@ -126,16 +122,13 @@ AeroNova wraps your host environment toolchains to catch errors and execute auto
 
 $$H(\text{CST}_{\text{orig}}, e) \to \text{CST}_{\text{healed}} \quad \text{where} \quad \text{CST}_{\text{healed}} = \text{Replace}(P(e, \text{CST}_{\text{orig}}), R(e))$$
 
-* 
-**Host Environment Introspection:** Automatically probes system binary paths and environment registries (`CC`, `CXX`, etc.) to locate and check local compilation capabilities using isolated test targets.
+* **Host Environment Introspection:** Automatically probes system binary paths and environment registries (`CC`, `CXX`, etc.) to locate and check local compilation capabilities using isolated test targets.
 
 
-* 
-**Stateful LSP Synchronization:** Spawns background JSON-RPC proxy sessions with native language servers (`clangd`, `rust-analyzer`, `pyright`) to intercept real-time diagnostic packages.
+* **Stateful LSP Synchronization:** Spawns background JSON-RPC proxy sessions with native language servers (`clangd`, `rust-analyzer`, `pyright`) to intercept real-time diagnostic packages.
 
 
-* 
-**Diagnostic Correction Matrix:** Maps explicit error codes directly to structural rewrite steps, capped at an iterative budget of 3 builds before rolling back safely to protect system invariants.
+* **Diagnostic Correction Matrix:** Maps explicit error codes directly to structural rewrite steps, capped at an iterative budget of 3 builds before rolling back safely to protect system invariants.
 
 
 
