@@ -956,6 +956,11 @@ def _parse_toml_native_blueprint(content: str, project_root: str) -> Dict[str, A
             for name, entry in bp.context_registry.items()
         },
         "inferred_language": inferred_language,
+        "scaling": {
+            "auto_split_threshold": bp.scaling.auto_split_threshold,
+            "max_module_complexity": bp.scaling.max_module_complexity,
+            "hierarchy_depth": bp.scaling.hierarchy_depth,
+        },
     }
     context.update(_default_optional_sections())
     return context

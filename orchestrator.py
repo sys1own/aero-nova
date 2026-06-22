@@ -221,6 +221,11 @@ if str(_REPO_ROOT) not in sys.path:
 
 logger = logging.getLogger("orchestrator")
 
+# Set by run_build() from the living blueprint's active_optimizer_flags so
+# _compile_targets and telemetry reflect the actual blueprint configuration
+# rather than the static manifest fallback.
+_bp_optimization_override: Optional[str] = None
+
 
 @dataclass
 class StageResult:
@@ -368,6 +373,18 @@ def _extract_build_context(workspace_root: Path, manifest: Dict[str, Any]) -> Di
     build_context["survival_tracker_stats"] = dict(orchestrator_state.get("survival_tracker_stats", {}))
     build_context["baseline_config"] = dict(orchestrator_state.get("baseline_config", {}))
     build_context["previous_fingerprints"] = dict(orchestrator_state.get("previous_fingerprints", {}))
+
+    # Propagate living-blueprint properties into metadata so the FSM and
+    # telemetry can read them dynamically instead of relying on hardcoded
+    # manifest values.
+    optimizer_flags = build_context.get("active_optimizer_flags", {})
+    bp_opt = optimizer_flags.get("profile_guided_optimization", "")
+    if bp_opt:
+        build_context["blueprint_optimization_level"] = bp_opt
+    scaling = build_context.get("scaling", {})
+    if isinstance(scaling, dict) and "max_module_complexity" in scaling:
+        build_context["blueprint_max_module_complexity"] = scaling["max_module_complexity"]
+
     return build_context
 
 
@@ -547,6 +564,10 @@ def _compile_targets(workspace_root: Path, manifest: Dict[str, Any]) -> Dict[str
     compiled_targets: List[Dict[str, Any]] = []
     bytes_written = 0
     optimization_level = _manifest_compactor_params(manifest)["optimization_level"]
+    # Let the living blueprint override the manifest-derived optimization level
+    # so the telemetry reflects the actual blueprint configuration.
+    if _bp_optimization_override:
+        optimization_level = _bp_optimization_override
     for target in targets:
         resolved = _resolve_target_paths(workspace_root, target)
         source_path = resolved["source_path"]
@@ -769,6 +790,14 @@ def run_build(
     stages = _load_brain_modules()
     manifest = _read_manifest_contract()
     metadata = _extract_build_context(workspace, manifest)
+
+    # Dynamically link the blueprint's optimization level to the module-level
+    # override so _compile_targets and telemetry read it instead of the static
+    # manifest fallback.
+    global _bp_optimization_override
+    bp_opt = metadata.get("blueprint_optimization_level", "")
+    _bp_optimization_override = bp_opt if bp_opt else None
+
     total_cycles = max(1, int(cycles))
     telemetry_state: Dict[str, Any] = {}
     stop_event = threading.Event()

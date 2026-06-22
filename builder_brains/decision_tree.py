@@ -50,7 +50,8 @@ class Strategy(Enum):
     FALLBACK_CASCADE = auto()
     RANDOM_RESTART = auto()
     WARM_BOOTSTRAP = auto()
-STRATEGY_PRIORITY: Dict[Strategy, int] = {Strategy.GREEDY: 0, Strategy.EXPLORATORY: 1, Strategy.BALANCED: 2, Strategy.CONSERVATIVE: 3, Strategy.FALLBACK_CASCADE: 4, Strategy.RANDOM_RESTART: 5, Strategy.WARM_BOOTSTRAP: 6}
+    AGGRESSIVE_MUTATION = auto()
+STRATEGY_PRIORITY: Dict[Strategy, int] = {Strategy.AGGRESSIVE_MUTATION: -1, Strategy.GREEDY: 0, Strategy.EXPLORATORY: 1, Strategy.BALANCED: 2, Strategy.CONSERVATIVE: 3, Strategy.FALLBACK_CASCADE: 4, Strategy.RANDOM_RESTART: 5, Strategy.WARM_BOOTSTRAP: 6}
 
 class EvaluationItem:
     """A single candidate action scored for the priority queue."""
@@ -468,6 +469,9 @@ def _generate_candidate_actions(metadata: Dict[str, Any], strategy: Strategy) ->
         actions.append({'label': 'full_parameter_reset', 'score': 0.5, 'cost': 0.25})
     if strategy == Strategy.WARM_BOOTSTRAP:
         actions.append({'label': 'warm_bootstrap_reseed', 'score': max(base_score, 0.55) * 1.1, 'cost': 0.1})
+    if strategy == Strategy.AGGRESSIVE_MUTATION:
+        actions.append({'label': 'execute_polyglot_decomposition', 'score': base_score * 1.3, 'cost': 0.18 * math.log1p(cycle)})
+        actions.append({'label': 'boost_mutation_sigma', 'score': base_score * 1.25, 'cost': 0.14 * math.log1p(cycle)})
     if not actions:
         actions.append({'label': 'noop_hold', 'score': base_score, 'cost': 0.0})
     return actions
@@ -538,6 +542,13 @@ def evaluate(metadata: Dict[str, Any], hyper_params: Dict[str, Any]) -> Dict[str
     primary_strategy = state_strategy_map.get(new_state, Strategy.BALANCED)
     if kinetic_alarm:
         primary_strategy = Strategy.EXPLORATORY
+    # Blueprint-driven strategy override: when the living blueprint requests
+    # an aggressive optimization level or sets a low complexity ceiling, the
+    # FSM yields to AGGRESSIVE_MUTATION regardless of score dynamics.
+    bp_opt_level = str(metadata.get('blueprint_optimization_level', '')).lower()
+    bp_max_complexity = metadata.get('blueprint_max_module_complexity')
+    if bp_opt_level == 'aggressive' or (bp_max_complexity is not None and int(bp_max_complexity) < 50):
+        primary_strategy = Strategy.AGGRESSIVE_MUTATION
     metadata['primary_strategy'] = primary_strategy.name
     router = FallbackRouter(max_depth=fallback_depth, ttl_seconds=route_ttl)
     resolved_strategy, cascade_depth = router.route(metadata=metadata, primary_strategy=primary_strategy, score=current_score, confidence_minimum=confidence_min)
@@ -593,6 +604,8 @@ def evaluate(metadata: Dict[str, Any], hyper_params: Dict[str, Any]) -> Dict[str
         metadata['exploration_depth'] = 1
     elif action_label == 'warm_bootstrap_reseed':
         metadata['strategy_mode'] = 'warm_bootstrap'
+    elif action_label == 'execute_polyglot_decomposition':
+        metadata['strategy_mode'] = 'aggressive_decomposition'
     else:
         metadata['strategy_mode'] = 'hold'
     elapsed = time.monotonic() - start_time
