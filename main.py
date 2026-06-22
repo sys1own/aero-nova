@@ -163,6 +163,14 @@ def build_command(args: argparse.Namespace) -> int:
         for asset in metadata.get("applied_assets", []):
             print(f"Updated asset: {asset}")
 
+    # Overlay system: re-apply the user's committed manual edits to the freshly
+    # generated sources so they survive regeneration (blueprint stays the source
+    # of truth for architecture; overlays preserve hand-tuned logic).
+    if not getattr(args, "no_overlay", False):
+        from src.build.overlay_stage import apply_overlays_stage
+
+        apply_overlays_stage(workspace, enabled=True)
+
     # Autonomous Hardware-Polymerization: probe the host and polymorphically
     # rewrite the freshly generated sources for it, after code generation but
     # before any linking/execution.  Runs transparently with no user flags.
@@ -757,12 +765,124 @@ def validate_command(args: argparse.Namespace) -> int:
     return 0 if report.passed else 1
 
 
+def _registry_db_path(args: argparse.Namespace, workspace: Path) -> Path:
+    if getattr(args, "db", None):
+        return Path(args.db)
+    return workspace / ".aero" / "registry.db"
+
+
+def _ingest_list(args: argparse.Namespace, workspace: Path) -> int:
+    """Print every ingested context in the AST registry with its semantic hash."""
+    from src.registry.ast_db import ASTDatabase
+
+    db_path = _registry_db_path(args, workspace)
+    if not db_path.is_file():
+        print("No AST registry found (nothing ingested yet).")
+        return 0
+
+    with ASTDatabase(db_path) as db:
+        entries = db.all_entries()
+
+    if not entries:
+        print("AST registry is empty.")
+        return 0
+
+    print("\nIngested contexts:")
+    by_context: dict = {}
+    for entry in entries:
+        by_context.setdefault(entry.context_name, []).append(entry)
+    for context_name in sorted(by_context):
+        files = by_context[context_name]
+        print(f"  {context_name} ({len(files)} file(s)):")
+        for entry in files:
+            print(f"    [{entry.language}] {entry.semantic_hash[:16]}  {entry.path}")
+    return 0
+
+
+def _ingest_registry(args: argparse.Namespace, workspace: Path) -> int:
+    """Parse a file/tree into the AST registry and register it in the blueprint."""
+    from src.registry.ingest import IngestError, ingest_context
+
+    source_path = Path(args.path).resolve()
+    context_name = args.context_name
+    if not context_name:
+        base = source_path if source_path.is_dir() else source_path.parent
+        context_name = base.name or "context"
+
+    blueprint_path = Path(args.blueprint) if args.blueprint else workspace / "blueprint.aero"
+    db_path = _registry_db_path(args, workspace)
+
+    try:
+        result = ingest_context(
+            context_name,
+            source_path,
+            language=args.language,
+            db_path=db_path,
+            blueprint_path=blueprint_path,
+        )
+    except IngestError as exc:
+        print(f"Ingestion failed: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"\nIngested context '{result.context_name}':")
+    print(f"  files ingested : {len(result.files)}")
+    for fr in result.files:
+        print(f"    [{fr.language}] {fr.semantic_hash[:16]}  {fr.path}")
+        if fr.functions:
+            print(f"        functions: {', '.join(fr.functions)}")
+        if fr.types:
+            print(f"        types    : {', '.join(fr.types)}")
+    if result.blueprint_updated:
+        print(f"  blueprint      : registered [context_registry.{result.context_name}] in {blueprint_path}")
+    elif result.files:
+        print(f"  blueprint      : '{result.context_name}' already registered")
+    if result.errors:
+        print("  errors:")
+        for err in result.errors:
+            print(f"    ! {err}")
+    print(f"  registry       : {db_path}")
+    return 0 if not result.errors else 1
+
+
+def commit_overlay_command(args: argparse.Namespace) -> int:
+    """Capture manual edits to a generated file as a reusable overlay patch."""
+    from src.overlay import OverlayError, OverlayManager
+
+    workspace = Path(args.workspace).resolve()
+    target = Path(args.file).resolve()
+    manager = OverlayManager(workspace)
+
+    try:
+        patch = manager.commit_overlay(target)
+    except OverlayError as exc:
+        print(f"commit-overlay failed: {exc}", file=sys.stderr)
+        return 1
+
+    key = manager.store.relkey(target)
+    if patch is None:
+        print(f"No manual edits detected in {key}; nothing to commit.")
+        return 0
+    overlay_path = manager.store.overlay_path(target)
+    line_count = sum(1 for ln in patch.splitlines() if ln[:1] in ("+", "-") and not ln.startswith(("+++", "---")))
+    print(f"Committed overlay for {key} ({line_count} changed line(s)).")
+    print(f"  saved to: {overlay_path}")
+    return 0
+
+
 def ingest_command(args: argparse.Namespace) -> int:
-    """Ingest external source trees declared in the [context] section."""
+    """Ingest source into the AST registry, or external trees from [context]."""
+    workspace = Path(args.workspace).resolve()
+
+    # New living-blueprint registry modes.
+    if getattr(args, "list", False):
+        return _ingest_list(args, workspace)
+    if getattr(args, "path", None):
+        return _ingest_registry(args, workspace)
+
+    # Legacy behaviour: ingest the source trees declared in [context].
     from src.context.ingest import ContextIngestor
 
     config = _load_blueprint_config(args.config)
-    workspace = Path(args.workspace).resolve()
     ingestor = ContextIngestor(config, workspace)
     report = ingestor.ingest_all()
 
@@ -1065,6 +1185,7 @@ def create_parser() -> argparse.ArgumentParser:
     build_parser.add_argument("--no-evolution", action="store_true", help="Skip the self-evolution pass after building")
     build_parser.add_argument("--no-hardware-probe", action="store_true", help="Skip hardware profiling at build start")
     build_parser.add_argument("--no-polymorph", action="store_true", help="Skip autonomous hardware-polymerization of generated code")
+    build_parser.add_argument("--no-overlay", action="store_true", help="Skip re-applying committed user overlays to generated code")
     build_parser.add_argument("--runtime-feedback", action="store_true", help="Run the runtime benchmark after building")
     build_parser.add_argument("--validation-only", action="store_true", help="Skip the build; only run the validation suite")
     build_parser.add_argument(
@@ -1122,10 +1243,54 @@ def create_parser() -> argparse.ArgumentParser:
 
 
     # --- ingest ---
-    ingest_parser = subparsers.add_parser("ingest", help="Ingest external source trees ([context])")
+    ingest_parser = subparsers.add_parser(
+        "ingest",
+        help="Ingest source into the AST registry (--path) or external trees ([context])",
+    )
     ingest_parser.add_argument("--workspace", default=".", help="Workspace root to ingest into")
     ingest_parser.add_argument("--config", default=None, help="Path to blueprint_config.json")
+    ingest_parser.add_argument(
+        "--path",
+        default=None,
+        help="File or directory to ingest into the AST registry and [context_registry]",
+    )
+    ingest_parser.add_argument(
+        "--context-name",
+        dest="context_name",
+        default=None,
+        help="Name for the context (defaults to the target directory name)",
+    )
+    ingest_parser.add_argument(
+        "--language",
+        default=None,
+        choices=["python", "rust"],
+        help="Force a language (otherwise inferred from file extensions)",
+    )
+    ingest_parser.add_argument(
+        "--blueprint",
+        default=None,
+        help="Path to blueprint.aero to register the context in (default: <workspace>/blueprint.aero)",
+    )
+    ingest_parser.add_argument(
+        "--db",
+        default=None,
+        help="Path to the AST registry database (default: <workspace>/.aero/registry.db)",
+    )
+    ingest_parser.add_argument(
+        "--list",
+        action="store_true",
+        help="List all ingested contexts in the AST registry with their semantic hashes",
+    )
     ingest_parser.set_defaults(handler=ingest_command)
+
+    # --- commit-overlay ---
+    overlay_parser = subparsers.add_parser(
+        "commit-overlay",
+        help="Save manual edits to a generated file as an overlay patch (preserved across rebuilds)",
+    )
+    overlay_parser.add_argument("file", help="Path to the edited generated file")
+    overlay_parser.add_argument("--workspace", default=".", help="Workspace root")
+    overlay_parser.set_defaults(handler=commit_overlay_command)
 
     # --- invariants (semantic fluidity) ---
     invariants_parser = subparsers.add_parser(

@@ -2,3 +2,7 @@ __pycache__/
 *.pyc
 *.pyo
 .pytest_cache/
+.aero/
+*.egg-info/
+.build_cache/
+.overlays/
