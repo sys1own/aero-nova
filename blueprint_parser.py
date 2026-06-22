@@ -916,6 +916,7 @@ def _parse_toml_native_blueprint(content: str, project_root: str) -> Dict[str, A
     context: Dict[str, Any] = {
         "workspace_status": "stable_active",
         "blueprint_format": "toml_native",
+        "blueprint_dir": project_root,
         "timestamp": time.time(),
         "compilation_targets": targets,
         "dependency_matrix": {t: [] for t in targets},

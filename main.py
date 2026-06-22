@@ -335,7 +335,48 @@ def _workspace_json_config(workspace: Path) -> dict:
 
 
 def _run_ingestion_stage(context: dict, workspace: Path) -> None:
-    # Context may be declared in blueprint.aero (INI) or blueprint_config.json.
+    # ---- TOML living-blueprint: ingest [context_registry] entries -----------
+    registry = context.get("context_registry")
+    if isinstance(registry, dict) and registry:
+        from src.registry.ingest import IngestError, ingest_context
+
+        # Resolve relative paths against the blueprint's parent directory.
+        blueprint_dir = Path(context.get("blueprint_dir", str(workspace)))
+        db_path = workspace / ".aero" / "registry.db"
+        bp_path = blueprint_dir / "blueprint.aero"
+
+        total_files = 0
+        total_errors: list = []
+        for name, entry in registry.items():
+            if not isinstance(entry, dict):
+                continue
+            raw_path = entry.get("path", "")
+            if not raw_path:
+                continue
+            target_path = Path(raw_path)
+            if not target_path.is_absolute():
+                target_path = (blueprint_dir / target_path).resolve()
+            language = entry.get("language") or None
+            try:
+                result = ingest_context(
+                    name,
+                    target_path,
+                    language=language,
+                    db_path=db_path,
+                    blueprint_path=bp_path if bp_path.exists() else None,
+                )
+                total_files += len(result.files)
+                total_errors.extend(result.errors)
+            except IngestError as exc:
+                total_errors.append(f"{name}: {exc}")
+
+        print(f"\n[context] ingesting {len(registry)} context(s) from [context_registry]...")
+        print(f"[context] ingested {total_files} file(s), errors {len(total_errors)}")
+        for err in total_errors:
+            print(f"[context]   ! {err}")
+        return
+
+    # ---- Legacy: ingest [context].sources from INI or blueprint_config.json --
     sources = (context.get("context", {}) or {}).get("sources", [])
     config = context
     if not sources:

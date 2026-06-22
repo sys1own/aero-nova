@@ -188,6 +188,61 @@ preserve_original_logic = true
         result = _coerce_to_list("graph", "targets", "core_logic, utils")
         self.assertEqual(result, ["core_logic", "utils"])
 
+    def test_toml_blueprint_stores_blueprint_dir(self):
+        """The build context should contain blueprint_dir so ingestion can
+        resolve relative paths against the blueprint's parent directory."""
+        minimal = """
+[system]
+name = "dir-test"
+strategy = "microkernel"
+
+[context_registry.core_logic]
+path = "./app.py"
+language = "python"
+"""
+        with tempfile.NamedTemporaryFile("w", suffix=".aero", delete=False, encoding="utf-8") as handle:
+            handle.write(minimal)
+            bp_path = handle.name
+
+        try:
+            context = parse_blueprint(bp_path)
+            self.assertIn("blueprint_dir", context)
+            # blueprint_dir should be the parent directory of the blueprint file.
+            self.assertEqual(
+                os.path.normpath(context["blueprint_dir"]),
+                os.path.normpath(os.path.dirname(os.path.abspath(bp_path))),
+            )
+        finally:
+            if os.path.exists(bp_path):
+                os.remove(bp_path)
+
+    def test_toml_context_registry_in_build_context(self):
+        """context_registry entries from TOML blueprints should be dicts with
+        path, language, and preserve_original_logic keys."""
+        minimal = """
+[system]
+name = "ctx-test"
+
+[context_registry.utils]
+path = "./utils.py"
+language = "python"
+preserve_original_logic = true
+"""
+        with tempfile.NamedTemporaryFile("w", suffix=".aero", delete=False, encoding="utf-8") as handle:
+            handle.write(minimal)
+            bp_path = handle.name
+
+        try:
+            context = parse_blueprint(bp_path)
+            registry = context.get("context_registry", {})
+            self.assertIn("utils", registry)
+            self.assertEqual(registry["utils"]["path"], "./utils.py")
+            self.assertEqual(registry["utils"]["language"], "python")
+            self.assertTrue(registry["utils"]["preserve_original_logic"])
+        finally:
+            if os.path.exists(bp_path):
+                os.remove(bp_path)
+
 
 if __name__ == "__main__":
     unittest.main()
