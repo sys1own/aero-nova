@@ -39,7 +39,6 @@ By abandoning language-specific compilers and non-deterministic probabilistic mo
 
  |
 | **Structural Memoisation** | Caches builds by structural UAST configuration rather than file text hashes (whitespace or comments never trigger rebuilds).
- |
 
 ---
 
@@ -138,15 +137,13 @@ $$H(\text{CST}_{\text{orig}}, e) \to \text{CST}_{\text{healed}} \quad \text{wher
 
 Manual modifications to automatically generated source code are isolated and protected against future builds without brittle, line-based text diff tools:
 
-1. 
-**Semantic Entity Merging:** Isolates file changes at a high construct level (namespaces, scopes, imports) using a calculated structural signature:
+1. **Semantic Entity Merging:** Isolates file changes at a high construct level (namespaces, scopes, imports) using a calculated structural signature:
 
 
 
 $$\text{ID} = (\text{Scope}_{\text{namespace}}, \, \text{Type}_{\text{construct}}, \, \text{Name}_{\text{entity}})$$
 
-2. 
-**Fine-Grained PCS Triple Merging:** If structural collisions occur within the same entity block, AeroNova breaks the changes down into Parent-Child-Successor relationships, tracks similarity via bottom-up node density propagation, and aligns the code trees while recovering original layout formatting.
+2. **Fine-Grained PCS Triple Merging:** If structural collisions occur within the same entity block, AeroNova breaks the changes down into Parent-Child-Successor relationships, tracks similarity via bottom-up node density propagation, and aligns the code trees while recovering original layout formatting.
 
 
 
@@ -178,22 +175,18 @@ AeroNova exposes an interactive multi-tool suite to drive the verification loop:
  |
 | `profile` | Display local hardware cache maps and vector optimization topologies.
 
- |
 
 ---
 
 ## System Requirements
 
-* 
-**Python 3.10+** 
+* **Python 3.10+** 
 
 
-* 
-**Tree-sitter Runtime Binaries** 
+* **Tree-sitter Runtime Binaries** 
 
 
-* 
-**Local Language Compilers/LSPs** mapped within your host environment paths (`clangd`, `rust-analyzer`, etc.) 
+* **Local Language Compilers/LSPs** mapped within your host environment paths (`clangd`, `rust-analyzer`, etc.) 
 
 
 
