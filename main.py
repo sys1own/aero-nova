@@ -1074,6 +1074,49 @@ def decompose_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def heal_command(args: argparse.Namespace) -> int:
+    """Run the deterministic self-healing build loop on a module."""
+    from core.toolchain.self_healing import heal_module, make_c_build_fn, make_rust_build_fn
+
+    workspace = Path(args.workspace).resolve()
+    target = Path(args.path).resolve()
+    blueprint_path = Path(args.blueprint) if args.blueprint else workspace / "blueprint.aero"
+
+    language = args.language
+    if language is None:
+        from core.parser.universal import detect_language
+
+        language = detect_language(target)
+
+    if language == "rust":
+        build_fn = make_rust_build_fn()
+    elif language in ("c", "cpp"):
+        build_fn = make_c_build_fn("cc" if language == "c" else "c++")
+    else:
+        print(f"heal: no compiler build driver for language {language!r}", file=sys.stderr)
+        return 1
+
+    report = heal_module(
+        target, build_fn,
+        language=language, workspace=workspace, blueprint_path=blueprint_path,
+        max_attempts=args.max_attempts,
+    )
+
+    print(f"\nSelf-healing: {report.path}")
+    print(f"  build attempts : {report.attempts} (budget {args.max_attempts})")
+    print(f"  applied fixes  : {', '.join(report.applied) or '(none)'}")
+    if report.success:
+        print("  result         : CLEAN BUILD")
+        return 0
+    print("  result         : FAILED")
+    if report.rolled_back:
+        print(f"  rolled back    : yes ({report.reason})")
+        print(f"  flagged in     : {blueprint_path} [self_healing]")
+    for d in report.final_diagnostics[:10]:
+        print(f"    [{d.code or '?'}] {d.message}")
+    return 1
+
+
 def toolchain_command(args: argparse.Namespace) -> int:
     """Discover, validate, and cache the host compilers/linkers/runtimes."""
     from core.toolchain import ToolchainIntrospector
@@ -1432,6 +1475,18 @@ def create_parser() -> argparse.ArgumentParser:
     )
     toolchain_parser.add_argument("--no-validate", action="store_true", help="Skip the sanity-compile validation step")
     toolchain_parser.set_defaults(handler=toolchain_command)
+
+    # --- heal (deterministic self-healing build loop) ---
+    heal_parser = subparsers.add_parser(
+        "heal",
+        help="Run the bounded, rule-based self-healing build loop on a module",
+    )
+    heal_parser.add_argument("--path", required=True, help="Source module to build and heal")
+    heal_parser.add_argument("--workspace", default=".", help="Workspace root")
+    heal_parser.add_argument("--blueprint", default=None, help="Path to blueprint.aero (failures are flagged here)")
+    heal_parser.add_argument("--language", default=None, choices=["rust", "c", "cpp"], help="Force the language")
+    heal_parser.add_argument("--max-attempts", type=int, default=3, help="Build attempt budget (default 3)")
+    heal_parser.set_defaults(handler=heal_command)
 
     # --- polymorphize (autonomous hardware-polymerization) ---
     poly_parser = subparsers.add_parser(

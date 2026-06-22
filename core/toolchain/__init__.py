@@ -14,8 +14,32 @@ from core.toolchain.lsp_proxy import (
     Transport,
     path_to_uri,
 )
+from core.toolchain.self_healing import (
+    MAX_BUILD_ATTEMPTS,
+    Category,
+    HealReport,
+    SymbolIndex,
+    categorize,
+    flag_healing_failure,
+    heal_module,
+    make_c_build_fn,
+    make_rust_build_fn,
+    parse_gcc_json,
+    parse_rustc_json,
+)
 
 __all__ = [
+    "MAX_BUILD_ATTEMPTS",
+    "Category",
+    "HealReport",
+    "SymbolIndex",
+    "categorize",
+    "flag_healing_failure",
+    "heal_module",
+    "make_c_build_fn",
+    "make_rust_build_fn",
+    "parse_gcc_json",
+    "parse_rustc_json",
     "Diagnostic",
     "IntrospectionError",
     "LspProxy",
