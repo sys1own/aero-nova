@@ -757,12 +757,99 @@ def validate_command(args: argparse.Namespace) -> int:
     return 0 if report.passed else 1
 
 
+def _registry_db_path(args: argparse.Namespace, workspace: Path) -> Path:
+    if getattr(args, "db", None):
+        return Path(args.db)
+    return workspace / ".aero" / "registry.db"
+
+
+def _ingest_list(args: argparse.Namespace, workspace: Path) -> int:
+    """Print every ingested context in the AST registry with its semantic hash."""
+    from src.registry.ast_db import ASTDatabase
+
+    db_path = _registry_db_path(args, workspace)
+    if not db_path.is_file():
+        print("No AST registry found (nothing ingested yet).")
+        return 0
+
+    with ASTDatabase(db_path) as db:
+        entries = db.all_entries()
+
+    if not entries:
+        print("AST registry is empty.")
+        return 0
+
+    print("\nIngested contexts:")
+    by_context: dict = {}
+    for entry in entries:
+        by_context.setdefault(entry.context_name, []).append(entry)
+    for context_name in sorted(by_context):
+        files = by_context[context_name]
+        print(f"  {context_name} ({len(files)} file(s)):")
+        for entry in files:
+            print(f"    [{entry.language}] {entry.semantic_hash[:16]}  {entry.path}")
+    return 0
+
+
+def _ingest_registry(args: argparse.Namespace, workspace: Path) -> int:
+    """Parse a file/tree into the AST registry and register it in the blueprint."""
+    from src.registry.ingest import IngestError, ingest_context
+
+    source_path = Path(args.path).resolve()
+    context_name = args.context_name
+    if not context_name:
+        base = source_path if source_path.is_dir() else source_path.parent
+        context_name = base.name or "context"
+
+    blueprint_path = Path(args.blueprint) if args.blueprint else workspace / "blueprint.aero"
+    db_path = _registry_db_path(args, workspace)
+
+    try:
+        result = ingest_context(
+            context_name,
+            source_path,
+            language=args.language,
+            db_path=db_path,
+            blueprint_path=blueprint_path,
+        )
+    except IngestError as exc:
+        print(f"Ingestion failed: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"\nIngested context '{result.context_name}':")
+    print(f"  files ingested : {len(result.files)}")
+    for fr in result.files:
+        print(f"    [{fr.language}] {fr.semantic_hash[:16]}  {fr.path}")
+        if fr.functions:
+            print(f"        functions: {', '.join(fr.functions)}")
+        if fr.types:
+            print(f"        types    : {', '.join(fr.types)}")
+    if result.blueprint_updated:
+        print(f"  blueprint      : registered [context_registry.{result.context_name}] in {blueprint_path}")
+    elif result.files:
+        print(f"  blueprint      : '{result.context_name}' already registered")
+    if result.errors:
+        print("  errors:")
+        for err in result.errors:
+            print(f"    ! {err}")
+    print(f"  registry       : {db_path}")
+    return 0 if not result.errors else 1
+
+
 def ingest_command(args: argparse.Namespace) -> int:
-    """Ingest external source trees declared in the [context] section."""
+    """Ingest source into the AST registry, or external trees from [context]."""
+    workspace = Path(args.workspace).resolve()
+
+    # New living-blueprint registry modes.
+    if getattr(args, "list", False):
+        return _ingest_list(args, workspace)
+    if getattr(args, "path", None):
+        return _ingest_registry(args, workspace)
+
+    # Legacy behaviour: ingest the source trees declared in [context].
     from src.context.ingest import ContextIngestor
 
     config = _load_blueprint_config(args.config)
-    workspace = Path(args.workspace).resolve()
     ingestor = ContextIngestor(config, workspace)
     report = ingestor.ingest_all()
 
@@ -1122,9 +1209,44 @@ def create_parser() -> argparse.ArgumentParser:
 
 
     # --- ingest ---
-    ingest_parser = subparsers.add_parser("ingest", help="Ingest external source trees ([context])")
+    ingest_parser = subparsers.add_parser(
+        "ingest",
+        help="Ingest source into the AST registry (--path) or external trees ([context])",
+    )
     ingest_parser.add_argument("--workspace", default=".", help="Workspace root to ingest into")
     ingest_parser.add_argument("--config", default=None, help="Path to blueprint_config.json")
+    ingest_parser.add_argument(
+        "--path",
+        default=None,
+        help="File or directory to ingest into the AST registry and [context_registry]",
+    )
+    ingest_parser.add_argument(
+        "--context-name",
+        dest="context_name",
+        default=None,
+        help="Name for the context (defaults to the target directory name)",
+    )
+    ingest_parser.add_argument(
+        "--language",
+        default=None,
+        choices=["python", "rust"],
+        help="Force a language (otherwise inferred from file extensions)",
+    )
+    ingest_parser.add_argument(
+        "--blueprint",
+        default=None,
+        help="Path to blueprint.aero to register the context in (default: <workspace>/blueprint.aero)",
+    )
+    ingest_parser.add_argument(
+        "--db",
+        default=None,
+        help="Path to the AST registry database (default: <workspace>/.aero/registry.db)",
+    )
+    ingest_parser.add_argument(
+        "--list",
+        action="store_true",
+        help="List all ingested contexts in the AST registry with their semantic hashes",
+    )
     ingest_parser.set_defaults(handler=ingest_command)
 
     # --- invariants (semantic fluidity) ---
