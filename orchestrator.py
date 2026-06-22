@@ -860,9 +860,39 @@ def run_build(
             after_snapshot = collect_workspace_snapshot(workspace)
             _enforce_read_only_boundary(before_snapshot, after_snapshot)
 
+            # Physical decomposition: when the FSM triggers aggressive
+            # decomposition, physically split source monoliths into modules.
+            if metadata.get("strategy_mode") == "aggressive_decomposition" or (
+                metadata.get("resolved_strategy") == "AGGRESSIVE_MUTATION"
+                and metadata.get("selected_action_label") in (
+                    "execute_polyglot_decomposition", "boost_mutation_sigma"
+                )
+            ):
+                from src.decomposition.splitter import run_decomposition
+
+                decomp_result = run_decomposition(metadata, workspace)
+                metadata["decomposition_files_written"] = decomp_result["decomposition_files_written"]
+                metadata["decomposition_file_count"] = decomp_result["decomposition_file_count"]
+                metadata["decomposition_bytes_written"] = decomp_result["decomposition_bytes_written"]
+                if decomp_result["decomposition_errors"]:
+                    logger.warning("Decomposition errors: %s", decomp_result["decomposition_errors"])
+
             manifest = _read_manifest_contract()
             compilation_summary = _compile_targets(workspace, manifest)
             metadata.update(compilation_summary)
+
+            # Merge decomposition output into the compiled/bytes telemetry
+            # so the BUILDER ORCHESTRATION TELEMETRY view reflects actual
+            # physical files written to disk.
+            if metadata.get("decomposition_files_written"):
+                metadata["compiled_target_count"] = (
+                    int(metadata.get("compiled_target_count", 0))
+                    + int(metadata.get("decomposition_file_count", 0))
+                )
+                metadata["bytes_written"] = (
+                    int(metadata.get("bytes_written", 0))
+                    + int(metadata.get("decomposition_bytes_written", 0))
+                )
             manifest = _persist_orchestrator_state(manifest, metadata)
             applied_assets = _apply_manifest_to_assets(workspace, manifest, metadata)
 
