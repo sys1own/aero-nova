@@ -254,6 +254,17 @@ def run_decomposition(
         total_bytes += result.bytes_written
         errors.extend(result.errors)
 
+        # Run the self-healing reflux pipeline on the decomposed package:
+        # Pass 1 consolidates duplicate utilities into utils.py,
+        # Pass 2 injects missing cross-module imports.
+        if result.files_written:
+            from src.decomposition.reflux import run_reflux
+
+            reflux_result = run_reflux(pkg_dir)
+            total_files.extend(reflux_result.extra_files)
+            total_bytes += reflux_result.extra_bytes
+            errors.extend(reflux_result.errors)
+
     return {
         "decomposition_files_written": total_files,
         "decomposition_file_count": len(total_files),
