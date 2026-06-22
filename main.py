@@ -1074,6 +1074,43 @@ def decompose_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def toolchain_command(args: argparse.Namespace) -> int:
+    """Discover, validate, and cache the host compilers/linkers/runtimes."""
+    from core.toolchain import ToolchainIntrospector
+
+    workspace = Path(args.workspace).resolve()
+    blueprint_path = Path(args.blueprint) if args.blueprint else workspace / "blueprint.aero"
+    introspector = ToolchainIntrospector(workspace)
+
+    languages = [args.language] if args.language else None
+    found = introspector.introspect(
+        languages,
+        blueprint_path=blueprint_path if languages is None else None,
+        validate=not args.no_validate,
+    )
+
+    print("\nHost toolchain introspection:")
+    if not found:
+        print("  (no matching toolchains found on this host)")
+    for lang in sorted(found):
+        tc = found[lang]
+        sane = "" if tc.sane is None else (" [sane]" if tc.sane else " [FAILED sanity]")
+        target = f" target={tc.target}" if tc.target else ""
+        print(f"  {lang}: {tc.binary} ({tc.kind}) v{tc.version or '?'}{target}{sane}")
+        print(f"      path: {tc.path}")
+        if tc.extra_flags or tc.compile_flags or tc.link_flags:
+            print(f"      flags: extra={tc.extra_flags} compile={tc.compile_flags} link={tc.link_flags}")
+        if tc.sane is False and tc.sanity_detail:
+            print(f"      sanity: {tc.sanity_detail}")
+
+    linker = introspector.discover_linker()
+    if linker:
+        print(f"  linker: {linker.binary} v{linker.version or '?'} ({linker.path})")
+    if not args.no_validate:
+        print(f"\n  cached validated configs under: {introspector.cache_dir}")
+    return 0
+
+
 def polymorphize_command(args: argparse.Namespace) -> int:
     """Inspect the host and polymorphically rewrite generated code for it.
 
@@ -1379,6 +1416,22 @@ def create_parser() -> argparse.ArgumentParser:
     decompose_parser.add_argument("--apply", action="store_true", help="Perform decomposition (default: dry-run plan only)")
     decompose_parser.add_argument("--no-dag", action="store_true", help="Do not write the inferred DAG to blueprint.aero")
     decompose_parser.set_defaults(handler=decompose_command)
+
+    # --- toolchain (host environment discovery) ---
+    toolchain_parser = subparsers.add_parser(
+        "toolchain",
+        help="Discover, validate, and cache host compilers/linkers/runtimes",
+    )
+    toolchain_parser.add_argument("--workspace", default=".", help="Workspace root")
+    toolchain_parser.add_argument("--blueprint", default=None, help="Path to blueprint.aero (drives language set)")
+    toolchain_parser.add_argument(
+        "--language",
+        default=None,
+        choices=["c", "cpp", "rust", "fortran", "python"],
+        help="Probe only this language (default: languages from the context registry)",
+    )
+    toolchain_parser.add_argument("--no-validate", action="store_true", help="Skip the sanity-compile validation step")
+    toolchain_parser.set_defaults(handler=toolchain_command)
 
     # --- polymorphize (autonomous hardware-polymerization) ---
     poly_parser = subparsers.add_parser(
