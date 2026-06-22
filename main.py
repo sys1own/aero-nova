@@ -1016,6 +1016,144 @@ def infer_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def decompose_command(args: argparse.Namespace) -> int:
+    """Deterministic dependency/complexity evaluator with optional auto-split."""
+    from core.analysis import InferenceEngine, decompose_file
+    from src.blueprint import load_blueprint
+
+    workspace = Path(args.workspace).resolve()
+    blueprint_path = Path(args.blueprint) if args.blueprint else workspace / "blueprint.aero"
+    scaling = load_blueprint(blueprint_path).scaling
+    engine = InferenceEngine(workspace)
+
+    if args.path:
+        files = [Path(args.path).resolve()]
+    else:
+        files = engine.iter_source_files()
+
+    analyses = engine.analyze_paths(files)
+    if not analyses:
+        print("No analysable source files found.")
+        return 0
+
+    print(f"\nComplexity report (max_module_complexity={scaling.max_module_complexity}, "
+          f"auto_split_threshold={scaling.auto_split_threshold}):")
+    for a in analyses:
+        flag = " [OVERSIZED]" if a.line_count > scaling.auto_split_threshold else ""
+        print(f"  {a.path} ({a.line_count} lines){flag}")
+        for fn in a.functions:
+            mark = "  <-- exceeds max_module_complexity" if fn.complexity > scaling.max_module_complexity else ""
+            print(f"      {fn.name}: M={fn.complexity}{mark}")
+        for edge in a.imports:
+            target = edge.resolved or "(external/unresolved)"
+            print(f"      import {edge.raw} -> {target}")
+
+    if not args.no_dag:
+        dag = engine.build_dag(analyses)
+        engine.write_dag_to_blueprint(blueprint_path, dag)
+        print(f"\n[dag] wrote {len(dag)} module edge-set(s) to {blueprint_path}")
+
+    print(f"\nDecomposition ({'APPLY' if args.apply else 'dry-run'}):")
+    any_action = False
+    for a in analyses:
+        plan = decompose_file(
+            engine,
+            workspace / a.path,
+            max_module_complexity=scaling.max_module_complexity,
+            auto_split_threshold=scaling.auto_split_threshold,
+            apply=args.apply,
+        )
+        for action in plan.actions:
+            any_action = True
+            verb = "split" if plan.applied else "would split"
+            print(f"  {verb} {a.path}::{action.function} -> {action.new_module} ({action.reason})")
+        for skip in plan.skipped:
+            print(f"  - {a.path}: {skip}")
+    if not any_action:
+        print("  no functions exceed the configured thresholds.")
+    return 0
+
+
+def heal_command(args: argparse.Namespace) -> int:
+    """Run the deterministic self-healing build loop on a module."""
+    from core.toolchain.self_healing import heal_module, make_c_build_fn, make_rust_build_fn
+
+    workspace = Path(args.workspace).resolve()
+    target = Path(args.path).resolve()
+    blueprint_path = Path(args.blueprint) if args.blueprint else workspace / "blueprint.aero"
+
+    language = args.language
+    if language is None:
+        from core.parser.universal import detect_language
+
+        language = detect_language(target)
+
+    if language == "rust":
+        build_fn = make_rust_build_fn()
+    elif language in ("c", "cpp"):
+        build_fn = make_c_build_fn("cc" if language == "c" else "c++")
+    else:
+        print(f"heal: no compiler build driver for language {language!r}", file=sys.stderr)
+        return 1
+
+    report = heal_module(
+        target, build_fn,
+        language=language, workspace=workspace, blueprint_path=blueprint_path,
+        max_attempts=args.max_attempts,
+    )
+
+    print(f"\nSelf-healing: {report.path}")
+    print(f"  build attempts : {report.attempts} (budget {args.max_attempts})")
+    print(f"  applied fixes  : {', '.join(report.applied) or '(none)'}")
+    if report.success:
+        print("  result         : CLEAN BUILD")
+        return 0
+    print("  result         : FAILED")
+    if report.rolled_back:
+        print(f"  rolled back    : yes ({report.reason})")
+        print(f"  flagged in     : {blueprint_path} [self_healing]")
+    for d in report.final_diagnostics[:10]:
+        print(f"    [{d.code or '?'}] {d.message}")
+    return 1
+
+
+def toolchain_command(args: argparse.Namespace) -> int:
+    """Discover, validate, and cache the host compilers/linkers/runtimes."""
+    from core.toolchain import ToolchainIntrospector
+
+    workspace = Path(args.workspace).resolve()
+    blueprint_path = Path(args.blueprint) if args.blueprint else workspace / "blueprint.aero"
+    introspector = ToolchainIntrospector(workspace)
+
+    languages = [args.language] if args.language else None
+    found = introspector.introspect(
+        languages,
+        blueprint_path=blueprint_path if languages is None else None,
+        validate=not args.no_validate,
+    )
+
+    print("\nHost toolchain introspection:")
+    if not found:
+        print("  (no matching toolchains found on this host)")
+    for lang in sorted(found):
+        tc = found[lang]
+        sane = "" if tc.sane is None else (" [sane]" if tc.sane else " [FAILED sanity]")
+        target = f" target={tc.target}" if tc.target else ""
+        print(f"  {lang}: {tc.binary} ({tc.kind}) v{tc.version or '?'}{target}{sane}")
+        print(f"      path: {tc.path}")
+        if tc.extra_flags or tc.compile_flags or tc.link_flags:
+            print(f"      flags: extra={tc.extra_flags} compile={tc.compile_flags} link={tc.link_flags}")
+        if tc.sane is False and tc.sanity_detail:
+            print(f"      sanity: {tc.sanity_detail}")
+
+    linker = introspector.discover_linker()
+    if linker:
+        print(f"  linker: {linker.binary} v{linker.version or '?'} ({linker.path})")
+    if not args.no_validate:
+        print(f"\n  cached validated configs under: {introspector.cache_dir}")
+    return 0
+
+
 def polymorphize_command(args: argparse.Namespace) -> int:
     """Inspect the host and polymorphically rewrite generated code for it.
 
@@ -1263,7 +1401,7 @@ def create_parser() -> argparse.ArgumentParser:
     ingest_parser.add_argument(
         "--language",
         default=None,
-        choices=["python", "rust"],
+        choices=["python", "rust", "cpp", "c", "fortran", "cobol"],
         help="Force a language (otherwise inferred from file extensions)",
     )
     ingest_parser.add_argument(
@@ -1309,6 +1447,46 @@ def create_parser() -> argparse.ArgumentParser:
     infer_parser.add_argument("--blueprint", default=None, help="Explicit path to a lean blueprint file")
     infer_parser.add_argument("--json", action="store_true", help="Emit the inferred DAG as JSON")
     infer_parser.set_defaults(handler=infer_command)
+
+    # --- decompose (deterministic dependency/complexity evaluator) ---
+    decompose_parser = subparsers.add_parser(
+        "decompose",
+        help="Analyse imports/complexity, write the DAG to blueprint.aero, and optionally auto-split functions",
+    )
+    decompose_parser.add_argument("--workspace", default=".", help="Workspace root")
+    decompose_parser.add_argument("--path", default=None, help="Single file to analyse (default: whole workspace)")
+    decompose_parser.add_argument("--blueprint", default=None, help="Path to blueprint.aero (default: <workspace>/blueprint.aero)")
+    decompose_parser.add_argument("--apply", action="store_true", help="Perform decomposition (default: dry-run plan only)")
+    decompose_parser.add_argument("--no-dag", action="store_true", help="Do not write the inferred DAG to blueprint.aero")
+    decompose_parser.set_defaults(handler=decompose_command)
+
+    # --- toolchain (host environment discovery) ---
+    toolchain_parser = subparsers.add_parser(
+        "toolchain",
+        help="Discover, validate, and cache host compilers/linkers/runtimes",
+    )
+    toolchain_parser.add_argument("--workspace", default=".", help="Workspace root")
+    toolchain_parser.add_argument("--blueprint", default=None, help="Path to blueprint.aero (drives language set)")
+    toolchain_parser.add_argument(
+        "--language",
+        default=None,
+        choices=["c", "cpp", "rust", "fortran", "python"],
+        help="Probe only this language (default: languages from the context registry)",
+    )
+    toolchain_parser.add_argument("--no-validate", action="store_true", help="Skip the sanity-compile validation step")
+    toolchain_parser.set_defaults(handler=toolchain_command)
+
+    # --- heal (deterministic self-healing build loop) ---
+    heal_parser = subparsers.add_parser(
+        "heal",
+        help="Run the bounded, rule-based self-healing build loop on a module",
+    )
+    heal_parser.add_argument("--path", required=True, help="Source module to build and heal")
+    heal_parser.add_argument("--workspace", default=".", help="Workspace root")
+    heal_parser.add_argument("--blueprint", default=None, help="Path to blueprint.aero (failures are flagged here)")
+    heal_parser.add_argument("--language", default=None, choices=["rust", "c", "cpp"], help="Force the language")
+    heal_parser.add_argument("--max-attempts", type=int, default=3, help="Build attempt budget (default 3)")
+    heal_parser.set_defaults(handler=heal_command)
 
     # --- polymorphize (autonomous hardware-polymerization) ---
     poly_parser = subparsers.add_parser(

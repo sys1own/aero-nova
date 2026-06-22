@@ -9,6 +9,7 @@
 # z3-solver backs the Precision Shield SMT validation.
 
 tree-sitter>=0.25,<0.26
+tree-sitter-python>=0.23,<0.25
 tree-sitter-rust>=0.24,<0.25
 tree-sitter-c>=0.24,<0.25
 tree-sitter-cpp>=0.23,<0.24

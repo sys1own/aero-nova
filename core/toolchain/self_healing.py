@@ -1,0 +1,509 @@
+"""Deterministic, non-probabilistic self-healing compilation wrapper.
+
+This module runs a module's build, intercepts *structured* diagnostics, and
+applies strictly rule-based Tree-sitter rewrites to repair a bounded set of
+well-understood errors.  Nothing here is probabilistic: every fix is a
+template-driven structural edit selected by error code / category, so the same
+(source, error) pair always yields the same healed source.
+
+Repair model (the H function)::
+
+    H(CST_orig, e) -> CST_healed
+        CST_healed = Replace(P(e, CST_orig), R(e))
+
+where ``e`` is an isolated error span, ``P`` is the Tree-sitter pattern matcher
+that locates the construct to edit, and ``R`` is the strict template fix.
+
+Execution is bounded to 3 successive build attempts per module.  If errors
+persist after the 3rd attempt the module's source is rolled back to its original
+clean state, the failure is flagged in ``blueprint.aero``, and we exit safely so
+a partial/corrupt edit is never left behind.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import subprocess
+from dataclasses import dataclass, field
+from enum import Enum
+from pathlib import Path
+from typing import Callable, Dict, List, Optional, Sequence, Union
+
+from core.parser.universal import _load_language, detect_language, extract_symbols, parse_source
+
+_PathLike = Union[str, Path]
+
+MAX_BUILD_ATTEMPTS = 3
+
+
+# ---------------------------------------------------------------------------
+# Unified diagnostic model (compiler JSON + LSP proxy)
+# ---------------------------------------------------------------------------
+@dataclass
+class Diagnostic:
+    message: str
+    file: str
+    code: Optional[str] = None
+    severity: str = "error"
+    line: int = 1
+    column: int = 1
+    start_byte: Optional[int] = None
+    end_byte: Optional[int] = None
+    source: str = "compiler"
+
+    @classmethod
+    def from_lsp(cls, lsp_diag, source_text: str = "") -> "Diagnostic":
+        from core.toolchain.lsp_proxy import Diagnostic as LspDiagnostic  # local import
+
+        assert isinstance(lsp_diag, LspDiagnostic)
+        return cls(
+            message=lsp_diag.message,
+            file=lsp_diag.uri,
+            code=str(lsp_diag.code) if lsp_diag.code is not None else None,
+            severity={1: "error", 2: "warning"}.get(lsp_diag.severity or 1, "info"),
+            line=lsp_diag.start.line + 1,
+            column=lsp_diag.start.character + 1,
+            start_byte=lsp_diag.start.byte,
+            end_byte=lsp_diag.end.byte,
+            source="lsp",
+        )
+
+
+# ---------------------------------------------------------------------------
+# 1. Structured diagnostic interception (compiler JSON parsers)
+# ---------------------------------------------------------------------------
+def parse_rustc_json(stream: str, only_errors: bool = True) -> List[Diagnostic]:
+    """Parse ``rustc --error-format=json`` (JSONL) into diagnostics."""
+    diags: List[Diagnostic] = []
+    for line in stream.splitlines():
+        line = line.strip()
+        if not line or not line.startswith("{"):
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if obj.get("$message_type") not in (None, "diagnostic"):
+            continue
+        if "message" not in obj or "spans" not in obj:
+            continue
+        level = obj.get("level", "error")
+        if only_errors and level != "error":
+            continue
+        code = (obj.get("code") or {}).get("code") if obj.get("code") else None
+        spans = obj.get("spans") or []
+        primary = next((s for s in spans if s.get("is_primary")), spans[0] if spans else None)
+        if primary is None:
+            continue
+        diags.append(Diagnostic(
+            message=obj.get("message", ""),
+            file=primary.get("file_name", ""),
+            code=code,
+            severity=level,
+            line=primary.get("line_start", 1),
+            column=primary.get("column_start", 1),
+            start_byte=primary.get("byte_start"),
+            end_byte=primary.get("byte_end"),
+            source="rustc",
+        ))
+    return diags
+
+
+def parse_gcc_json(stream: str, only_errors: bool = True) -> List[Diagnostic]:
+    """Parse ``gcc/clang -fdiagnostics-format=json`` output into diagnostics."""
+    text = stream.strip()
+    if not text:
+        return []
+    # gcc emits a JSON array (sometimes several, one per TU); be lenient.
+    payloads = []
+    for chunk in re.findall(r"\[.*?\]", text, re.DOTALL):
+        try:
+            payloads.extend(json.loads(chunk))
+        except json.JSONDecodeError:
+            continue
+    diags: List[Diagnostic] = []
+    for item in payloads:
+        kind = item.get("kind", "error")
+        if only_errors and kind != "error":
+            continue
+        locations = item.get("locations") or []
+        caret = (locations[0].get("caret") if locations else {}) or {}
+        finish = (locations[0].get("finish") if locations else {}) or {}
+        diags.append(Diagnostic(
+            message=item.get("message", ""),
+            file=caret.get("file", ""),
+            code=item.get("option"),
+            severity=kind,
+            line=caret.get("line", 1),
+            column=caret.get("column", 1),
+            start_byte=caret.get("byte-column"),
+            end_byte=finish.get("byte-column"),
+            source="gcc",
+        ))
+    return diags
+
+
+# ---------------------------------------------------------------------------
+# 2. Error categorisation (the matrix keys)
+# ---------------------------------------------------------------------------
+class Category(str, Enum):
+    MISSING_IMPORT = "missing_import"
+    IMMUTABLE_ASSIGNMENT = "immutable_assignment"
+    MISSING_SEMICOLON = "missing_semicolon"
+
+
+def categorize(diag: Diagnostic) -> Optional[Category]:
+    code = (diag.code or "").upper()
+    msg = diag.message.lower()
+    if code in {"E0432", "E0433"} or "unresolved import" in msg \
+            or "could not be resolved" in msg or "reportmissingimports" in code.lower() \
+            or ("is not defined" in msg) or "reportundefinedvariable" in (diag.code or "").lower():
+        return Category.MISSING_IMPORT
+    if code in {"E0384", "E0594", "E0596"} \
+            or ("cannot assign" in msg and "immutable" in msg) \
+            or ("cannot borrow" in msg and "as mutable" in msg):
+        return Category.IMMUTABLE_ASSIGNMENT
+    if "expected ';'" in msg or "expected semi" in msg or code == "EXPECTED_SEMICOLON" \
+            or ("expected" in msg and "`;`" in msg):
+        return Category.MISSING_SEMICOLON
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Structural edits
+# ---------------------------------------------------------------------------
+@dataclass
+class Edit:
+    start: int
+    end: int
+    text: str
+
+
+def _apply_edits(source: bytes, edits: Sequence[Edit]) -> bytes:
+    """Apply non-overlapping edits in reverse byte order (deterministic)."""
+    result = source
+    for edit in sorted(edits, key=lambda e: e.start, reverse=True):
+        result = result[:edit.start] + edit.text.encode("utf-8") + result[edit.end:]
+    return result
+
+
+def _symbol_from_message(message: str) -> Optional[str]:
+    m = re.search(r"`([^`]+)`", message) or re.search(r'"([^"]+)"', message)
+    if not m:
+        return None
+    token = m.group(1)
+    # For import paths (a::b::c / a.b.c) keep the leaf identifier.
+    for sep in ("::", "."):
+        if sep in token:
+            token = token.split(sep)[-1]
+    return token or None
+
+
+# ---------------------------------------------------------------------------
+# 3. The Self-Healing Mapping Matrix (P + R per category)
+# ---------------------------------------------------------------------------
+class SymbolIndex:
+    """Maps declared function/type names to their defining module path (the DAG)."""
+
+    def __init__(self) -> None:
+        self.by_symbol: Dict[str, str] = {}
+
+    @classmethod
+    def build(cls, workspace: Path) -> "SymbolIndex":
+        index = cls()
+        for path in sorted(workspace.rglob("*")):
+            if not path.is_file():
+                continue
+            language = detect_language(path)
+            if language is None:
+                continue
+            try:
+                text = path.read_text(encoding="utf-8")
+                uast = parse_source(text, language)
+            except Exception:
+                continue
+            symbols = extract_symbols(uast, text)
+            rel = path.resolve().relative_to(workspace).as_posix()
+            for name in symbols["functions"] + symbols["types"]:
+                index.by_symbol.setdefault(name, rel)
+        return index
+
+    def module_for(self, symbol: str) -> Optional[str]:
+        return self.by_symbol.get(symbol)
+
+
+def _module_ref(rel_path: str, language: str) -> str:
+    stem = re.sub(r"\.[^.]+$", "", rel_path)
+    if language == "python":
+        return stem.replace("/", ".")
+    if language == "rust":
+        return "crate::" + stem.split("/")[-1]
+    return stem
+
+
+def heal_missing_import(source: bytes, diag: Diagnostic, language: str, index: Optional[SymbolIndex]) -> List[Edit]:
+    symbol = _symbol_from_message(diag.message)
+    if not symbol:
+        return []
+    module = index.module_for(symbol) if index else None
+    if language == "python":
+        if module:
+            ref = _module_ref(module, "python")
+            line = f"from {ref} import {symbol}\n" if "." in ref else f"import {ref}\n"
+        else:
+            line = f"import {symbol}\n"
+    elif language == "rust":
+        if module:
+            line = f"use {_module_ref(module, 'rust')}::{symbol};\n"
+        else:
+            line = f"use crate::{symbol};\n"
+    else:
+        return []
+    return [Edit(0, 0, line)]
+
+
+def heal_immutable_assignment(source: bytes, diag: Diagnostic, language: str) -> List[Edit]:
+    if language != "rust":
+        return []
+    name = _symbol_from_message(diag.message)
+    if not name:
+        return []
+    from tree_sitter import Parser, Query, QueryCursor
+
+    lang_obj = _load_language("rust")
+    tree = Parser(lang_obj).parse(source)
+    query = Query(lang_obj, "(let_declaration pattern: (identifier) @name) @decl")
+    caps = QueryCursor(query).captures(tree.root_node)
+    decls = caps.get("decl", [])
+    names = caps.get("name", [])
+    for decl in sorted(decls, key=lambda n: n.start_byte):
+        if any(c.type == "mutable_specifier" for c in decl.children):
+            continue
+        for name_node in names:
+            if decl.start_byte <= name_node.start_byte and name_node.end_byte <= decl.end_byte:
+                if source[name_node.start_byte:name_node.end_byte].decode("utf-8", "replace") == name:
+                    return [Edit(name_node.start_byte, name_node.start_byte, "mut ")]
+    return []
+
+
+def heal_missing_semicolon(source: bytes, diag: Diagnostic, language: str) -> List[Edit]:
+    if diag.start_byte is None:
+        return []
+    pos = max(0, min(diag.start_byte, len(source)))
+    # Append the delimiter at the broken statement's byte boundary, unless one is
+    # already present there.
+    if pos < len(source) and source[pos:pos + 1] == b";":
+        return []
+    return [Edit(pos, pos, ";")]
+
+
+# ---------------------------------------------------------------------------
+# 4. Bounded correction loop + rollback
+# ---------------------------------------------------------------------------
+@dataclass
+class HealReport:
+    path: str
+    success: bool
+    attempts: int
+    rolled_back: bool = False
+    applied: List[str] = field(default_factory=list)   # categories applied per attempt
+    final_diagnostics: List[Diagnostic] = field(default_factory=list)
+    reason: Optional[str] = None
+
+
+BuildFn = Callable[[Path], List[Diagnostic]]
+
+
+def _plan_edits(source: bytes, diags: Sequence[Diagnostic], language: str,
+                index: Optional[SymbolIndex]) -> List[Edit]:
+    """H's pattern+template stage: produce non-overlapping edits for this attempt."""
+    edits: List[Edit] = []
+    occupied: List[range] = []
+
+    def overlaps(start: int, end: int) -> bool:
+        return any(not (end < r.start or start > r.stop) for r in occupied)
+
+    # Deterministic order: by category then byte position.
+    ordered = sorted(
+        [(categorize(d), d) for d in diags],
+        key=lambda cd: (cd[0].value if cd[0] else "zzz", cd[1].start_byte or 0),
+    )
+    for category, diag in ordered:
+        if category is None:
+            continue
+        if category == Category.MISSING_IMPORT:
+            new = heal_missing_import(source, diag, language, index)
+        elif category == Category.IMMUTABLE_ASSIGNMENT:
+            new = heal_immutable_assignment(source, diag, language)
+        elif category == Category.MISSING_SEMICOLON:
+            new = heal_missing_semicolon(source, diag, language)
+        else:
+            new = []
+        for edit in new:
+            if overlaps(edit.start, edit.end):
+                continue
+            edits.append(edit)
+            occupied.append(range(edit.start, max(edit.start, edit.end)))
+    return edits
+
+
+def heal_module(
+    path: _PathLike,
+    build_fn: BuildFn,
+    *,
+    language: Optional[str] = None,
+    workspace: Optional[_PathLike] = None,
+    blueprint_path: Optional[_PathLike] = None,
+    max_attempts: int = MAX_BUILD_ATTEMPTS,
+    symbol_index: Optional[SymbolIndex] = None,
+) -> HealReport:
+    """Run the bounded self-healing loop for a single module.
+
+    ``build_fn(path)`` must return the structured diagnostics for the current
+    on-disk source (an empty list means a clean build).  After at most
+    ``max_attempts`` builds the source is either healed or rolled back.
+    """
+    file_path = Path(path).resolve()
+    resolved_language = language or detect_language(file_path)
+    if resolved_language is None:
+        raise ValueError(f"Unsupported file extension: {file_path.suffix!r}")
+
+    ws = Path(workspace).resolve() if workspace else file_path.parent
+    if symbol_index is None and resolved_language in ("python", "rust"):
+        symbol_index = SymbolIndex.build(ws)
+
+    original = file_path.read_bytes()
+    report = HealReport(path=file_path.as_posix(), success=False, attempts=0)
+
+    for attempt in range(1, max_attempts + 1):
+        report.attempts = attempt
+        diags = build_fn(file_path)
+        if not diags:
+            report.success = True
+            return report
+        report.final_diagnostics = diags
+
+        # Last attempt failed -> do not edit further; fall through to rollback.
+        if attempt == max_attempts:
+            break
+
+        source = file_path.read_bytes()
+        edits = _plan_edits(source, diags, resolved_language, symbol_index)
+        if not edits:
+            report.reason = "no applicable healing rule"
+            break
+        healed = _apply_edits(source, edits)
+        if healed == source:
+            report.reason = "healing made no progress"
+            break
+        file_path.write_bytes(healed)
+        for category, diag in ((categorize(d), d) for d in diags):
+            if category:
+                report.applied.append(category.value)
+
+    # Exhausted / stuck -> rollback to the original clean state and flag.
+    file_path.write_bytes(original)
+    report.rolled_back = True
+    if report.reason is None:
+        report.reason = f"unresolved after {report.attempts} build attempt(s)"
+    if blueprint_path is not None:
+        rel = _safe_rel(file_path, ws)
+        flag_healing_failure(blueprint_path, rel, report.reason, report.final_diagnostics)
+    return report
+
+
+def _safe_rel(path: Path, workspace: Path) -> str:
+    try:
+        return path.resolve().relative_to(workspace).as_posix()
+    except ValueError:
+        return path.as_posix()
+
+
+# ---------------------------------------------------------------------------
+# blueprint.aero failure flagging
+# ---------------------------------------------------------------------------
+def _toml_str(value: str) -> str:
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _strip_table(text: str, name: str) -> str:
+    out: List[str] = []
+    skip = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("["):
+            skip = (stripped == f"[{name}]" or stripped.startswith(f"[{name}.")
+                    or stripped.startswith(f"[[{name}"))
+        if not skip:
+            out.append(line)
+    result = "\n".join(out).rstrip("\n")
+    return result + "\n" if result else ""
+
+
+def flag_healing_failure(
+    blueprint_path: _PathLike, module: str, reason: str, diagnostics: Sequence[Diagnostic]
+) -> None:
+    """Record a self-healing failure under ``[self_healing]`` in the blueprint."""
+    bp_path = Path(blueprint_path)
+    text = bp_path.read_text(encoding="utf-8") if bp_path.is_file() else ""
+
+    # Parse any existing failures so we update the table idempotently.
+    existing: Dict[str, str] = {}
+    try:
+        from src.blueprint.loader import _toml as _t
+
+        if text:
+            parsed = _t.loads(text)
+            for key, value in (parsed.get("self_healing") or {}).items():
+                if isinstance(value, str):
+                    existing[key] = value
+    except Exception:
+        pass
+
+    codes = ",".join(sorted({d.code for d in diagnostics if d.code})) or "unknown"
+    existing[module] = f"rolled_back: {reason} (codes: {codes})"
+
+    text = _strip_table(text, "self_healing")
+    lines = ["[self_healing]"]
+    for key in sorted(existing):
+        lines.append(f"{_toml_str(key)} = {_toml_str(existing[key])}")
+    block = "\n".join(lines) + "\n"
+    if text and not text.endswith("\n"):
+        text += "\n"
+    if text and not text.endswith("\n\n"):
+        text += "\n"
+    text += block
+    bp_path.parent.mkdir(parents=True, exist_ok=True)
+    bp_path.write_text(text, encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# Real compiler build functions (structured JSON interception)
+# ---------------------------------------------------------------------------
+def make_rust_build_fn(timeout: float = 60.0) -> BuildFn:
+    """A build_fn that compiles a Rust file and returns structured diagnostics."""
+    import tempfile
+
+    def build(path: Path) -> List[Diagnostic]:
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "out"
+            proc = subprocess.run(
+                ["rustc", "--error-format=json", "--edition", "2021", str(path), "-o", str(out)],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=timeout,
+            )
+            return parse_rustc_json(proc.stderr)
+
+    return build
+
+
+def make_c_build_fn(compiler: str = "cc", timeout: float = 60.0) -> BuildFn:
+    """A build_fn that syntax-checks a C/C++ file and returns structured diagnostics."""
+    def build(path: Path) -> List[Diagnostic]:
+        proc = subprocess.run(
+            [compiler, "-fsyntax-only", "-fdiagnostics-format=json", str(path)],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=timeout,
+        )
+        return parse_gcc_json(proc.stderr)
+
+    return build
