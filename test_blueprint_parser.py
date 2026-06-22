@@ -117,7 +117,11 @@ class TestBlueprintParser(unittest.TestCase):
                 os.remove(bad_blueprint_path)
 
     def test_parse_blueprint_returns_build_context(self):
-        blueprint_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "blueprint.aero")
+        # The repo's blueprint.aero migrated to the living-blueprint schema, so the
+        # legacy parser is exercised against a preserved legacy fixture instead.
+        blueprint_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "tests", "fixtures", "legacy_blueprint.aero"
+        )
         context = parse_blueprint(blueprint_path)
 
         self.assertEqual(context["workspace_status"], "stable_active")

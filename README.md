@@ -67,8 +67,7 @@ ephemeral_code = true             # Code is regenerated; manual patches are stor
   max_module_complexity = 200     # Cyclomatic complexity per module
   hierarchy_depth = 4             # Max nested module depth
 
-[context_bridges]
-  [[context_bridges]]
+[[context_bridges]]
   source = "ai_fraud_lib"
   target = "legacy_cobol"
   bridge_type = "grpc_sidecar"    # ffi | grpc | message_queue | shared_memory

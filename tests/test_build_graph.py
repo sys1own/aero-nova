@@ -286,9 +286,11 @@ class TestPlanCommand(unittest.TestCase):
 
     def test_plan_legacy_ini_blueprint(self):
         from main import main as cli_main
-        ini_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "blueprint.aero")
+        # The repo's blueprint.aero migrated to the living-blueprint schema, so the
+        # legacy INI/JSON parser is exercised against a preserved legacy fixture.
+        ini_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures", "legacy_blueprint.aero")
         if not os.path.exists(ini_path):
-            self.skipTest("blueprint.aero not found")
+            self.skipTest("legacy_blueprint.aero fixture not found")
         out = io.StringIO()
         with redirect_stdout(out):
             rc = cli_main(["plan", "--blueprint", ini_path])
