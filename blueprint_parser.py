@@ -18,7 +18,32 @@ logger = logging.getLogger("blueprint_parser")
 _MANIFEST_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "builder_brains", "build_manifest.json"
 )
-_REQUIRED_SECTIONS = ("graph", "compiler", "cortex")
+_REQUIRED_SECTIONS = ("system",)
+
+# Sections that were formerly required but are now optional with sensible
+# defaults so that minimal TOML blueprints work out of the box.
+_DEFAULTABLE_SECTIONS = ("graph", "compiler", "cortex")
+
+_DEFAULT_COMPILER = {
+    "profile_guided_optimization": "enabled_strict",
+    "tier_shifting_hotness_threshold": 100,
+    "hotspot_loop_unroll_depth": 32,
+    "aot_boundary_check_elimination": True,
+    "vector_intrinsics_auto_generation": True,
+    "pipeline_budget_seconds": 120.0,
+    "max_memory_mb": 2048,
+}
+
+_DEFAULT_CORTEX = {
+    "consensus_protocol": "raft_driven_mutation_lock",
+    "mutation_entropy_clamp_threshold": 0.05,
+    "total_cooperating_agents": 8,
+    "heuristic_exploration_depth": 3,
+    "execution_mode": "lock_free_polling_wheel_realtime",
+    "core_affinity_mask": "0xFFFF",
+    "numa_node_locality_binding": True,
+    "inter_core_ring_buffer_capacity": 262144,
+}
 
 # Decomposition strategies recognised in the [scaffold] block.  The empty string
 # (default) means "no decomposition" — copy/optimize the single source entry.
@@ -235,6 +260,24 @@ def parse_literal(value: str) -> Any:
     return cleaned
 
 
+def _coerce_to_list(section: str, key: str, value: Any) -> List[Any]:
+    """Coerce *value* into a list, handling strings that look like JSON arrays."""
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            try:
+                parsed = json.loads(stripped)
+                if isinstance(parsed, list):
+                    return parsed
+            except json.JSONDecodeError:
+                pass
+        # Comma-separated fallback
+        return [item.strip() for item in stripped.split(",") if item.strip()]
+    raise BlueprintParseError(f"[{section}] {key} must be a list or a JSON array string")
+
+
 def _coerce_dependency_map(raw_dependencies: Any) -> Dict[str, List[str]]:
     if not isinstance(raw_dependencies, dict):
         raise BlueprintParseError("[graph] dependencies must be a JSON object")
@@ -261,19 +304,49 @@ def _coerce_dependency_map(raw_dependencies: Any) -> Dict[str, List[str]]:
 
 
 def _validate_sections(sections: Dict[str, Dict[str, Any]]) -> Dict[str, List[str]]:
-    missing = [section for section in _REQUIRED_SECTIONS if section not in sections]
-    if missing:
+    # [system] is truly required only when no legacy required sections exist.
+    # Accept blueprints that provide either the old trio OR [system].
+    has_old_trio = all(s in sections for s in _DEFAULTABLE_SECTIONS)
+    has_system = "system" in sections
+    if not has_old_trio and not has_system:
+        # Legacy callers still get the original error message.
+        missing = [s for s in _DEFAULTABLE_SECTIONS if s not in sections]
         raise BlueprintParseError(f"Missing required section(s): {', '.join(missing)}")
 
-    graph = sections["graph"]
-    if "targets" not in graph:
-        raise BlueprintParseError("[graph] targets is required")
-    if "dependencies" not in graph:
-        raise BlueprintParseError("[graph] dependencies is required")
+    # --- inject sensible defaults for optional sections ---
+    sections.setdefault("graph", {})
+    sections.setdefault("compiler", dict(_DEFAULT_COMPILER))
+    sections.setdefault("cortex", dict(_DEFAULT_CORTEX))
 
-    targets = graph["targets"]
-    if not isinstance(targets, list) or not targets:
-        raise BlueprintParseError("[graph] targets must be a non-empty JSON list")
+    # Back-fill individual compiler/cortex keys so downstream code never misses them.
+    for key, val in _DEFAULT_COMPILER.items():
+        sections["compiler"].setdefault(key, val)
+    for key, val in _DEFAULT_CORTEX.items():
+        sections["cortex"].setdefault(key, val)
+
+    graph = sections["graph"]
+
+    # Infer targets from [context_registry] keys when omitted.
+    if "targets" not in graph:
+        registry = sections.get("context_registry", {})
+        if isinstance(registry, dict) and registry:
+            graph["targets"] = list(registry.keys())
+        # If still empty after inference, that is fine — we'll just have an empty graph.
+
+    if "dependencies" not in graph:
+        # Auto-create an empty dependency map when targets exist.
+        graph["dependencies"] = {}
+
+    targets = graph.get("targets", [])
+    # Coerce string-encoded arrays into real lists.
+    targets = _coerce_to_list("graph", "targets", targets) if targets else []
+    graph["targets"] = targets
+
+    if not targets:
+        # No targets at all — return an empty dependency map (valid minimal blueprint).
+        graph["targets"] = []
+        graph["target_metadata"] = []
+        return {}
 
     normalized_targets: List[str] = []
     target_metadata: List[Dict[str, Any]] = []
@@ -321,7 +394,8 @@ def _validate_sections(sections: Dict[str, Dict[str, Any]]) -> Dict[str, List[st
         ("cortex", "inter_core_ring_buffer_capacity", int),
     )
     for section_name, key, expected_type in numeric_fields:
-        value = sections[section_name].get(key)
+        section = sections.get(section_name, {})
+        value = section.get(key)
         if value is not None and not isinstance(value, expected_type):
             raise BlueprintParseError(f"[{section_name}] {key} has an invalid type")
 
@@ -332,7 +406,8 @@ def _validate_sections(sections: Dict[str, Dict[str, Any]]) -> Dict[str, List[st
         ("cortex", "numa_node_locality_binding"),
     )
     for section_name, key in bool_fields:
-        value = sections[section_name].get(key)
+        section = sections.get(section_name, {})
+        value = section.get(key)
         if value is not None and not isinstance(value, bool):
             raise BlueprintParseError(f"[{section_name}] {key} must be a boolean")
 
@@ -801,6 +876,90 @@ def create_fallback_context(manifest: Dict[str, Any], error_msg: str) -> Dict[st
     return build_context
 
 
+def _looks_like_toml_native(content: str) -> bool:
+    """Return True if the content looks like a TOML living-blueprint.
+
+    A living blueprint begins with ``[system]`` (possibly after comments/blanks)
+    and may contain ``[context_registry.*]`` sub-tables.  This is distinct from
+    the legacy INI format (which starts with ``[graph]``) and the block DSL.
+    """
+    for raw in content.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or line.startswith(";"):
+            continue
+        if line.startswith("["):
+            section_name = line.strip("[]").strip().split(".")[0]
+            return section_name in ("system", "context_registry")
+        break
+    return False
+
+
+def _parse_toml_native_blueprint(content: str, project_root: str) -> Dict[str, Any]:
+    """Parse a TOML living-blueprint and return a normalised build_context.
+
+    Uses :mod:`src.blueprint.loader` to get typed dataclasses then converts
+    them into the dict-based build_context the engines expect.
+    """
+    from src.blueprint.loader import LivingBlueprint
+
+    bp = LivingBlueprint.from_str(content)
+
+    # Derive compilation targets from the context registry entries.
+    targets = list(bp.context_registry.keys()) if bp.context_registry else []
+
+    # Auto-detect language from context entries for compiler default.
+    languages = {
+        entry.language for entry in bp.context_registry.values() if entry.language
+    }
+    inferred_language = next(iter(languages), "python3") if languages else "python3"
+
+    context: Dict[str, Any] = {
+        "workspace_status": "stable_active",
+        "blueprint_format": "toml_native",
+        "timestamp": time.time(),
+        "compilation_targets": targets,
+        "dependency_matrix": {t: [] for t in targets},
+        "active_optimizer_flags": dict(_DEFAULT_COMPILER),
+        "environment_targets": {
+            "execution_mode": _DEFAULT_CORTEX["execution_mode"],
+            "core_affinity_mask": _DEFAULT_CORTEX["core_affinity_mask"],
+            "numa_node_locality_binding": _DEFAULT_CORTEX["numa_node_locality_binding"],
+            "inter_core_ring_buffer_capacity": _DEFAULT_CORTEX["inter_core_ring_buffer_capacity"],
+        },
+        "resource_metrics": {
+            "pipeline_budget_seconds": _DEFAULT_COMPILER["pipeline_budget_seconds"],
+            "max_memory_mb": _DEFAULT_COMPILER["max_memory_mb"],
+            "elapsed_seconds": {t: 0.0 for t in targets},
+        },
+        "node_configurations": {},
+        "graph": {
+            "entrypoint": "orchestrator",
+            "targets": targets,
+            "target_metadata": [{"name": t} for t in targets],
+            "dependencies": {t: [] for t in targets},
+            "workspace_mode": "incremental",
+            "allow_partial_graph": False,
+        },
+        "system": {
+            "name": bp.system.name,
+            "version": bp.system.version,
+            "strategy": bp.system.strategy,
+            "ephemeral_code": bp.system.ephemeral_code,
+        },
+        "context_registry": {
+            name: {
+                "path": entry.path,
+                "language": entry.language,
+                "preserve_original_logic": entry.preserve_original_logic,
+            }
+            for name, entry in bp.context_registry.items()
+        },
+        "inferred_language": inferred_language,
+    }
+    context.update(_default_optional_sections())
+    return context
+
+
 def _looks_like_lean(content: str) -> bool:
     """Detect the ultra-lean Invisible Configuration dialect (lazy import)."""
     from src.invisible_config.lean_parser import looks_like_lean_blueprint
@@ -880,6 +1039,15 @@ def parse_blueprint(blueprint_path: str, manifest_path: str = _MANIFEST_PATH) ->
         except Exception as exc:  # noqa: BLE001 - fall back to stable manifest
             logger.exception("Lean blueprint inference failed for %s", blueprint_path)
             return create_fallback_context(stable_manifest, f"Lean blueprint inference failed: {exc}")
+
+    # TOML living-blueprint format: [system] + [context_registry.*] sections.
+    # Routed through the proper TOML loader for clean, minimal configurations.
+    if _looks_like_toml_native(content):
+        try:
+            return _parse_toml_native_blueprint(content, os.path.dirname(os.path.abspath(blueprint_path)))
+        except Exception as exc:  # noqa: BLE001 - fall back to stable manifest
+            logger.exception("TOML blueprint parsing failed for %s", blueprint_path)
+            return create_fallback_context(stable_manifest, f"TOML blueprint parsing failed: {exc}")
 
     # JSON blueprints take a dedicated, strict path: validation errors are
     # surfaced (raised) rather than silently falling back, so misconfigured

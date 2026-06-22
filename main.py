@@ -619,9 +619,22 @@ def check_command(args: argparse.Namespace) -> int:
 
     source = bp_path.read_text(encoding="utf-8")
     if source.strip() and not blueprint_lang.looks_like_blueprint_dsl(source):
+        # TOML living-blueprint ([system] / [context_registry]) is a first-class
+        # format — validate it via the TOML loader rather than dismissing it.
+        from blueprint_parser import _looks_like_toml_native
+        if _looks_like_toml_native(source):
+            try:
+                from src.blueprint.loader import LivingBlueprint
+                LivingBlueprint.from_str(source)
+                print(f"{bp_path}: OK -- TOML living-blueprint is valid")
+                return 0
+            except Exception as exc:
+                print(f"{bp_path}: TOML blueprint validation failed: {exc}", file=sys.stderr)
+                return 1
         print(
-            f"{bp_path}: legacy INI/JSON blueprint detected; the strict DSL "
-            "checker only validates block-format blueprints, so nothing to check."
+            f"{bp_path}: INI/JSON blueprint detected; the strict DSL "
+            "checker only validates block-format blueprints. "
+            "Use 'python main.py build' to exercise INI/JSON blueprints."
         )
         return 0
 

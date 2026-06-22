@@ -129,6 +129,65 @@ class TestBlueprintParser(unittest.TestCase):
         self.assertEqual(context["compilation_targets"], ["scanner", "decision_tree", "parameter_tuner", "compactor", "aero_translator"])
         self.assertIn("max_memory_mb", context["resource_metrics"])
 
+    def test_minimal_toml_blueprint_no_crash(self):
+        """A minimal TOML blueprint with [system] + [context_registry] must
+        parse without crashes, inferring targets and using default compiler/cortex."""
+        minimal = """
+[system]
+name = "colab-test-system"
+strategy = "universal-engine"
+ephemeral_code = true
+
+[context_registry.core_logic]
+path = "./app.py"
+language = "python"
+preserve_original_logic = true
+"""
+        with tempfile.NamedTemporaryFile("w", suffix=".aero", delete=False, encoding="utf-8") as handle:
+            handle.write(minimal)
+            bp_path = handle.name
+
+        try:
+            context = parse_blueprint(bp_path)
+            self.assertEqual(context["workspace_status"], "stable_active")
+            self.assertEqual(context["blueprint_format"], "toml_native")
+            self.assertIn("core_logic", context["compilation_targets"])
+            self.assertIn("max_memory_mb", context["resource_metrics"])
+            self.assertIn("active_optimizer_flags", context)
+            self.assertIn("environment_targets", context)
+        finally:
+            if os.path.exists(bp_path):
+                os.remove(bp_path)
+
+    def test_optional_sections_default_injection(self):
+        """When [graph], [compiler], and [cortex] are missing but [system] is
+        present, _validate_sections should inject defaults instead of raising."""
+        from blueprint_parser import _validate_sections
+        sections = {"system": {"name": "test"}}
+        deps = _validate_sections(sections)
+        self.assertIn("graph", sections)
+        self.assertIn("compiler", sections)
+        self.assertIn("cortex", sections)
+        self.assertIsInstance(deps, dict)
+
+    def test_coerce_to_list_native_list(self):
+        """Native Python lists pass through _coerce_to_list unchanged."""
+        from blueprint_parser import _coerce_to_list
+        result = _coerce_to_list("graph", "targets", ["a", "b"])
+        self.assertEqual(result, ["a", "b"])
+
+    def test_coerce_to_list_json_string(self):
+        """A JSON array string is parsed into a real list."""
+        from blueprint_parser import _coerce_to_list
+        result = _coerce_to_list("graph", "targets", '["core_logic", "utils"]')
+        self.assertEqual(result, ["core_logic", "utils"])
+
+    def test_coerce_to_list_comma_separated(self):
+        """Comma-separated strings are split into a list."""
+        from blueprint_parser import _coerce_to_list
+        result = _coerce_to_list("graph", "targets", "core_logic, utils")
+        self.assertEqual(result, ["core_logic", "utils"])
+
 
 if __name__ == "__main__":
     unittest.main()
