@@ -97,3 +97,42 @@ class OverlayManager:
         for key in self.store.list_overlays():
             results[key] = self.reapply(self.store.file_for_key(key))
         return results
+
+    # -- structural (AST) reapply --------------------------------------------
+    def structural_reapply(
+        self,
+        file: _PathLike,
+        regenerated_text: str,
+        *,
+        language=None,
+        build_fn=None,
+        blueprint_path: _PathLike = None,
+    ) -> ReapplyStatus:
+        """Re-apply user edits with the structural 3-way AST merge engine.
+
+        This is the AST-based successor to the line-by-line overlay reapply:
+        ``base`` is the pristine snapshot in ``.build_cache``, *Left* is the
+        user's current on-disk file, and *Right* is ``regenerated_text``.  The
+        merge is verified before being written; on conflict/verification failure
+        the on-disk file is left untouched and (if given) the collision is
+        flagged in ``blueprint.aero``.
+        """
+        from core.overlay.structural_merger import StructuralMerger
+
+        path = Path(file).resolve()
+        if not path.is_file():
+            return ReapplyStatus.MISSING
+        base = self.store.read_cache(path)
+        if base is None:
+            base = path.read_text(encoding="utf-8")
+
+        merger = StructuralMerger(self.workspace)
+        outcome = merger.merge_file(
+            path, base, regenerated_text,
+            language=language, build_fn=build_fn, blueprint_path=blueprint_path,
+        )
+        if not outcome.accepted:
+            return ReapplyStatus.CONFLICT
+        # The freshly generated text is the pristine baseline for the next cycle.
+        self.store.record_generated(path, regenerated_text)
+        return ReapplyStatus.APPLIED
