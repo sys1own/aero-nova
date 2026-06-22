@@ -625,20 +625,6 @@ def check_command(args: argparse.Namespace) -> int:
     return 1
 
 
-def evolve_command(args: argparse.Namespace) -> int:
-    """Run the self-evolution bootstrap engine."""
-    from src.evolution.bootstrap import SelfEvolutionEngine
-
-    config_path = Path(args.config) if args.config else _BLUEPRINT_CONFIG
-    workspace = Path(args.workspace).resolve()
-    engine = SelfEvolutionEngine(config_path, workspace)
-    best = engine.evolve(max_generations=args.generations)
-    print(f"\nEvolution complete.  Best candidate: {best.id}")
-    print(f"  Fitness: {best.fitness}")
-    print(f"  Genome:  {best.genome}")
-    return 0
-
-
 def analyze_command(args: argparse.Namespace) -> int:
     """Run the semantic proximity mapping engine."""
     from src.analysis.semantic_mapper import SemanticMapper
@@ -751,77 +737,6 @@ def libraries_command(args: argparse.Namespace) -> int:
         print("\nEvolvable library genome space:")
         for gene, values in space.items():
             print(f"  {gene}: {values}")
-    return 0
-
-
-def gpu_command(args: argparse.Namespace) -> int:
-    """Plan (and optionally run) GPU kernel compilation."""
-    from src.build.gpu_pipeline import GPUPipeline
-
-    config = _load_blueprint_config(args.config)
-    project_root = Path(args.workspace).resolve()
-    pipeline = GPUPipeline(config)
-    plan = pipeline.plan(project_root)
-
-    print("\nGPU Offloading Plan:")
-    print(f"  enabled  : {plan['enabled']}")
-    print(f"  backend  : {plan['backend']}")
-    print(f"  compiler : {plan['compiler']} (available: {plan['available']})")
-    print(f"  kernels  : {plan['kernel_count']}")
-    for step in plan["compile_steps"]:
-        print(f"    - {step['source']} -> {step['output']}")
-    print(f"  link flags: {' '.join(plan['link_flags']) or '(none)'}")
-
-    if args.compile:
-        results = pipeline.compile_kernels(project_root)
-        print("\nCompilation results:")
-        for r in results:
-            print(f"    [{r.status}] {r.source}")
-    return 0
-
-
-def physics_command(args: argparse.Namespace) -> int:
-    """Run heuristic dimensional analysis over the project's Python sources."""
-    from src.physics.units import DimensionalAnalyzer
-
-    config = _load_blueprint_config(args.config)
-    project_root = Path(args.workspace).resolve()
-    analyzer = DimensionalAnalyzer(config)
-
-    if not analyzer.enabled:
-        print("\nPhysics symbolic_validation is disabled in the blueprint; nothing to check.")
-        return 0
-
-    warnings = analyzer.analyze_project(project_root)
-    print(f"\nDimensional Analysis ({len(warnings)} warning(s)):")
-    for w in warnings:
-        print(f"  {w}")
-    return 0 if not warnings else 1
-
-
-def hpc_command(args: argparse.Namespace) -> int:
-    """Generate (and optionally submit) an HPC batch script for the build."""
-    import blueprint_parser
-    from src.hpc.scheduler import HPCScheduler
-
-    workspace = Path(args.workspace).resolve()
-    context = blueprint_parser.parse_blueprint(str(workspace / "blueprint.aero"))
-    scheduler = HPCScheduler(context)
-
-    if not scheduler.enabled:
-        print("HPC scheduler is 'none'; nothing to submit (builds run locally).")
-        return 0
-
-    commands = [args.command_to_run] if args.command_to_run else ["python main.py build --no-hpc"]
-    if args.submit:
-        if not scheduler.available():
-            print(f"{scheduler.submit_binary} not found on PATH; cannot submit.")
-            return 1
-        job = scheduler.submit(commands, job_name="aero_build", workdir=str(workspace))
-        print(f"Submitted: {job.to_dict()}")
-        return 0 if job.submitted else 1
-
-    print(scheduler.generate_script(commands, job_name="aero_build", workdir=str(workspace)))
     return 0
 
 
@@ -1176,13 +1091,6 @@ def create_parser() -> argparse.ArgumentParser:
     check_parser.add_argument("--blueprint", default=None, help="Explicit path to a blueprint file")
     check_parser.set_defaults(handler=check_command)
 
-    # --- evolve ---
-    evolve_parser = subparsers.add_parser("evolve", help="Run the self-evolution bootstrap engine")
-    evolve_parser.add_argument("--workspace", default=".", help="Workspace root")
-    evolve_parser.add_argument("--config", default=None, help="Path to blueprint_config.json")
-    evolve_parser.add_argument("--generations", type=int, default=10, help="Max generations")
-    evolve_parser.set_defaults(handler=evolve_command)
-
     # --- analyze ---
     analyze_parser = subparsers.add_parser("analyze", help="Run semantic proximity mapping")
     analyze_parser.add_argument("--workspace", default=".", help="Project root")
@@ -1212,18 +1120,6 @@ def create_parser() -> argparse.ArgumentParser:
     lib_parser.add_argument("--config", default=None, help="Path to blueprint_config.json")
     lib_parser.set_defaults(handler=libraries_command)
 
-    # --- gpu ---
-    gpu_parser = subparsers.add_parser("gpu", help="Plan/compile GPU kernels")
-    gpu_parser.add_argument("--workspace", default=".", help="Project root")
-    gpu_parser.add_argument("--config", default=None, help="Path to blueprint_config.json")
-    gpu_parser.add_argument("--compile", action="store_true", help="Actually compile (needs nvcc/hipcc)")
-    gpu_parser.set_defaults(handler=gpu_command)
-
-    # --- physics ---
-    physics_parser = subparsers.add_parser("physics", help="Run dimensional-analysis checks")
-    physics_parser.add_argument("--workspace", default=".", help="Project root")
-    physics_parser.add_argument("--config", default=None, help="Path to blueprint_config.json")
-    physics_parser.set_defaults(handler=physics_command)
 
     # --- ingest ---
     ingest_parser = subparsers.add_parser("ingest", help="Ingest external source trees ([context])")
@@ -1259,13 +1155,6 @@ def create_parser() -> argparse.ArgumentParser:
     )
     poly_parser.add_argument("--profile-only", action="store_true", help="Only print the host topology; do not rewrite")
     poly_parser.set_defaults(handler=polymorphize_command)
-
-    # --- hpc ---
-    hpc_parser = subparsers.add_parser("hpc", help="Generate or submit an HPC build job")
-    hpc_parser.add_argument("--workspace", default=".", help="Project root (reads blueprint.aero)")
-    hpc_parser.add_argument("--submit", action="store_true", help="Submit the job (default: just print the script)")
-    hpc_parser.add_argument("--command-to-run", default=None, help="Command the job should execute")
-    hpc_parser.set_defaults(handler=hpc_command)
 
     # --- validate ---
     validate_parser = subparsers.add_parser("validate", help="Run the validation suite")
