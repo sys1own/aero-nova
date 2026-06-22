@@ -813,6 +813,11 @@ def run_build(
     try:
         for cycle in range(1, total_cycles + 1):
             metadata["current_cycle"] = cycle
+            # Reset per-cycle decomposition state so stale counts from
+            # previous cycles don't bleed into telemetry.
+            metadata.pop("decomposition_files_written", None)
+            metadata.pop("decomposition_file_count", None)
+            metadata.pop("decomposition_bytes_written", None)
             before_snapshot = collect_workspace_snapshot(workspace)
             delta = compute_workspace_delta(
                 metadata.get("previous_fingerprints", {}) if isinstance(metadata.get("previous_fingerprints"), dict) else {},
@@ -841,8 +846,11 @@ def run_build(
                 decision_metadata, decision_result = decision_future.result()
                 tuner_metadata, tuner_result = tuner_future.result()
 
-            metadata.update(decision_metadata)
+            # Apply tuner first, then decision — the decision tree is
+            # authoritative for strategy/action/FSM keys and must not be
+            # overwritten by the tuner's stale snapshot of those fields.
             metadata.update(tuner_metadata)
+            metadata.update(decision_metadata)
             stage_results.extend([decision_result, tuner_result])
 
             if bool(metadata.get("kinetic_stagnation_anomaly") or metadata.get("is_stagnant")):
