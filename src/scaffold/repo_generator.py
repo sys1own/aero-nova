@@ -23,13 +23,33 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from src.build.cargo_manifest import render_manifest, sanitize_crate_name
+from src.build.cargo_manifest import (
+    PYO3_REQUIRED_FEATURES,
+    ensure_pyo3_features,
+    render_manifest,
+    sanitize_crate_name,
+)
 
-# Conservative, modern default versions for the anchored crates.
+# Conservative, modern default versions for the anchored crates.  ``pyo3`` ships
+# with the declarative-modules feature set so modern structural ``#[pymodule]``
+# macros compile out of the box (see ``ensure_pyo3_features``).
 _DEFAULT_DEPENDENCY_VERSIONS = {
     "rug": "1.24",
-    "pyo3": {"version": "0.22", "features": ["extension-module"]},
+    "pyo3": {"version": "0.21", "features": list(PYO3_REQUIRED_FEATURES)},
+    "rayon": "1.10",
 }
+
+# Rayon parallel-iterator adaptors observed in the AST pipeline.  Their presence
+# implies a ``rayon`` dependency even when the source omits an explicit ``use``.
+_RAYON_PARALLEL_PATTERNS = re.compile(
+    r"\.(?:par_iter_mut|par_iter|into_par_iter|par_chunks(?:_mut)?|"
+    r"par_bridge|par_extend|par_sort(?:_\w+)?)\s*\("
+)
+
+
+def _uses_parallel_iterators(source: str) -> bool:
+    """True when the source drives Rayon parallel iterators / adaptors."""
+    return bool(_RAYON_PARALLEL_PATTERNS.search(source))
 
 
 @dataclass
@@ -84,8 +104,15 @@ def infer_dependencies(source: str, overrides: Optional[Dict[str, Any]] = None) 
     for crate, default in _DEFAULT_DEPENDENCY_VERSIONS.items():
         if re.search(rf"\b(?:use|extern crate)\s+{crate}\b", source) or re.search(rf"\b{crate}::", source):
             deps[crate] = default
+    # Rayon is implied by parallel-iterator adaptors even without an explicit
+    # ``use rayon`` line, so map it consistently when those appear.
+    if "rayon" not in deps and _uses_parallel_iterators(source):
+        deps["rayon"] = _DEFAULT_DEPENDENCY_VERSIONS["rayon"]
     if overrides:
         deps.update(overrides)
+    # Enforce the pyo3 declarative-modules feature set even when an override
+    # pins a bare version, so structural ``#[pymodule]`` macros always compile.
+    deps = ensure_pyo3_features(deps)
     return deps
 
 

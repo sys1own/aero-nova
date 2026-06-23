@@ -128,9 +128,12 @@ class CompilerBackend(ABC):
         env: Optional[Dict[str, str]] = None,
     ) -> CompileResult:
         cwd = str(workdir) if workdir else None
-        run_env: Optional[Dict[str, str]] = None
+        # Always inherit the parent shell's full configuration footprint so that
+        # low-memory limits (CARGO_BUILD_JOBS=1, codegen-units=1) and custom
+        # compiler paths set in the environment are never dropped; any per-build
+        # overrides (e.g. RUSTFLAGS) are layered on top.
+        run_env: Dict[str, str] = dict(os.environ)
         if env:
-            run_env = dict(os.environ)
             run_env.update(env)
         try:
             proc = subprocess.run(

@@ -37,6 +37,41 @@ MANIFEST_NAME = "Cargo.toml"
 DEFAULT_EDITION = "2021"
 DEFAULT_VERSION = "0.1.0"
 
+# Features that a ``pyo3`` dependency must always carry so modern structural
+# (declarative) ``#[pymodule]`` macros compile without manual user edits.  The
+# framework injects these implicitly whenever ``pyo3`` is a target dependency.
+PYO3_REQUIRED_FEATURES = ("extension-module", "experimental-declarative-modules")
+
+
+def ensure_pyo3_features(dependencies: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Guarantee a ``pyo3`` dependency declares the declarative-modules features.
+
+    Whenever ``pyo3`` appears in *dependencies* the inline-table form is forced
+    and :data:`PYO3_REQUIRED_FEATURES` are merged in (preserving any features the
+    caller already pinned and their order).  A bare version string such as
+    ``"0.21"`` is upgraded to ``{"version": "0.21", "features": [...]}``.
+
+    The input mapping is never mutated; a normalised copy is returned.
+    """
+    if not dependencies or "pyo3" not in dependencies:
+        return dict(dependencies or {})
+
+    deps = dict(dependencies)
+    spec = deps["pyo3"]
+    if isinstance(spec, dict):
+        new_spec = dict(spec)
+        features = list(new_spec.get("features", []) or [])
+    else:
+        # Bare version string (or anything scalar) -> promote to a table.
+        new_spec = {"version": str(spec)}
+        features = []
+    for feature in PYO3_REQUIRED_FEATURES:
+        if feature not in features:
+            features.append(feature)
+    new_spec["features"] = features
+    deps["pyo3"] = new_spec
+    return deps
+
 
 # ---------------------------------------------------------------------------
 # Plan returned to the compiler backend
@@ -223,7 +258,9 @@ def render_manifest(
     ``header`` overrides the default "synthesised, commit your own" comment --
     standalone-repo generators pass a header appropriate to a committed manifest.
     """
-    dependencies = dependencies or {}
+    # Implicitly inject the declarative-modules feature set whenever pyo3 is a
+    # dependency, so generated manifests build against modern structural macros.
+    dependencies = ensure_pyo3_features(dependencies or {})
     if header is None:
         header_lines = [
             "# Synthesised by Aero Universal. Commit a Cargo.toml to take full control;",

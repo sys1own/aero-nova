@@ -156,6 +156,7 @@ class Category(str, Enum):
     DUPLICATE_DEFINITION = "duplicate_definition"
     UNRESOLVED_PARENT_IMPORT = "unresolved_parent_import"
     MISMATCHED_SLICE_TYPE = "mismatched_slice_type"
+    PYO3_GLOB_IMPORT = "pyo3_glob_import"
 
 
 def categorize(diag: Diagnostic) -> Optional[Category]:
@@ -163,6 +164,10 @@ def categorize(diag: Diagnostic) -> Optional[Category]:
     msg = diag.message.lower()
 
     # --- Rust-specific advanced rules (checked first for specificity) --------
+
+    # PyO3 declarative #[pymodule] cannot re-export glob (`use super::*;`) imports.
+    if "pymodule" in msg and "glob" in msg:
+        return Category.PYO3_GLOB_IMPORT
 
     # E0433 / E0405: missing crate or module (Cargo.toml dependency injection)
     if code in {"E0433", "E0405"}:
@@ -432,12 +437,53 @@ def heal_missing_crate(
     return []
 
 
-def heal_duplicate_definition(source: bytes, diag: Diagnostic, language: str) -> List[Edit]:
-    """E0428: remove the *second* (duplicate) definition of a symbol.
+def _return_type_text(node: Any, source: bytes) -> str:
+    """Return the textual return type of a function item, or ``""``."""
+    rt = node.child_by_field_name("return_type")
+    if rt is None:
+        return ""
+    return source[rt.start_byte:rt.end_byte].decode("utf-8", "replace")
 
-    Uses Tree-sitter to locate both definitions.  The *later* one (by byte
-    offset) is commented out, preserving the earlier definition that downstream
-    code may already depend on.
+
+def _returns_nested_array(node: Any, source: bytes) -> bool:
+    """True if the function returns a 2D stack array, e.g. ``[[Complex; 4]; 4]``."""
+    return bool(re.search(r"\[\s*\[", _return_type_text(node, source)))
+
+
+def _returns_flat_sequence(node: Any, source: bytes) -> bool:
+    """True if the function returns a contiguous flat/heap sequence.
+
+    Covers ``Vec<T>`` (1D heap), ``&[T]`` / ``[T]`` slices and ``Box<[T]>`` —
+    the continuous-memory shapes that flat-slice call sites (``&[Complex]``)
+    expect.
+    """
+    text = _return_type_text(node, source)
+    if re.search(r"\[\s*\[", text):  # nested array is *not* flat
+        return False
+    return bool(
+        re.search(r"\bVec\s*<", text)
+        or re.search(r"&\s*\[", text)
+        or re.search(r"\bBox\s*<\s*\[", text)
+        or re.fullmatch(r"\[\s*[^\[\];]+;\s*[^\[\];]+\]", text.strip())  # 1D [T; N]
+    )
+
+
+def heal_duplicate_definition(source: bytes, diag: Diagnostic, language: str) -> List[Edit]:
+    """E0428: resolve a duplicate symbol, type-awarely where possible.
+
+    Uses Tree-sitter to locate every top-level definition of ``symbol``.
+
+    Type-aware path: when one variant returns a 2D stack array
+    (``[[Complex; 4]; 4]``) and another returns a contiguous flat/heap shape
+    (``Vec<Complex>`` / ``&[Complex]``), the 2D matrix variant is *renamed*
+    (``<symbol>_legacy``) rather than deleted.  This preserves the
+    continuous-memory variant that flat-slice call sites (e.g.
+    ``apply_two_qudit_unitary`` expecting ``&[Complex]``) depend on, avoiding a
+    type-breaking cascade.
+
+    Fallback: when the variants are not type-discriminable, the *later*
+    duplicate (by byte offset) is commented out, preserving the earlier
+    definition downstream code may already depend on.
     """
     if language != "rust":
         return []
@@ -452,15 +498,35 @@ def heal_duplicate_definition(source: bytes, diag: Diagnostic, language: str) ->
 
     # Walk the top-level children looking for items that declare ``symbol``.
     defs: List[Any] = []
+    name_nodes: List[Any] = []
     for child in tree.root_node.children:
         name_node = _find_name_in_item(child, symbol, source)
         if name_node is not None:
             defs.append(child)
+            name_nodes.append(name_node)
 
     if len(defs) < 2:
         return []
 
-    # Comment out the *later* duplicate (preserve the first).
+    # Type-aware resolution: rename 2D matrix variant(s) to <symbol>_legacy and
+    # keep the flat continuous-memory variant the call sites expect.
+    nested = [
+        (node, nm)
+        for node, nm in zip(defs, name_nodes)
+        if node.type == "function_item" and _returns_nested_array(node, source)
+    ]
+    flat = [
+        node
+        for node in defs
+        if node.type == "function_item" and _returns_flat_sequence(node, source)
+    ]
+    if nested and flat and len(nested) < len(defs):
+        edits: List[Edit] = []
+        for _node, nm in nested:
+            edits.append(Edit(nm.start_byte, nm.end_byte, f"{symbol}_legacy"))
+        return edits
+
+    # Fallback: comment out the *later* duplicate (preserve the first).
     dup = defs[-1]
     dup_text = source[dup.start_byte:dup.end_byte].decode("utf-8", "replace")
     commented = "/* [auto-healed: duplicate removed]\n" + dup_text + "\n*/"
@@ -477,6 +543,119 @@ def _find_name_in_item(node: Any, symbol: str, source: bytes) -> Optional[Any]:
             if text == symbol:
                 return child
     return None
+
+
+_PYMODULE_ITEM_TYPES = ("mod_item", "function_item")
+_NAMED_ITEM_TYPES = (
+    "function_item",
+    "struct_item",
+    "enum_item",
+    "union_item",
+    "type_item",
+    "const_item",
+    "static_item",
+    "trait_item",
+)
+
+
+def _find_pymodule_item(root: Any, source: bytes) -> Optional[Any]:
+    """Locate the item carrying a ``#[pymodule]`` attribute.
+
+    In tree-sitter-rust the attribute is an ``attribute_item`` sibling that
+    *precedes* the annotated ``mod``/``fn`` item, so we track pending attributes
+    while scanning the top-level children.
+    """
+    pending_pymodule = False
+    for child in root.children:
+        if child.type == "attribute_item":
+            text = source[child.start_byte:child.end_byte].decode("utf-8", "replace")
+            if "pymodule" in text:
+                pending_pymodule = True
+            continue
+        if child.type in _PYMODULE_ITEM_TYPES and pending_pymodule:
+            return child
+        # Some grammars nest the attribute inside the item; check there too.
+        if child.type in _PYMODULE_ITEM_TYPES:
+            for sub in child.children:
+                if sub.type == "attribute_item":
+                    text = source[sub.start_byte:sub.end_byte].decode("utf-8", "replace")
+                    if "pymodule" in text:
+                        return child
+        pending_pymodule = False
+    return None
+
+
+def _find_super_glob_use(node: Any, source: bytes) -> Optional[Any]:
+    """Find a ``use super::*;`` declaration anywhere inside ``node``."""
+    stack = list(node.children)
+    while stack:
+        current = stack.pop(0)
+        if current.type == "use_declaration":
+            text = source[current.start_byte:current.end_byte].decode("utf-8", "replace")
+            if "super" in text and "*" in text:
+                return current
+        stack.extend(current.children)
+    return None
+
+
+def _item_name(node: Any, source: bytes) -> Optional[str]:
+    """Return the declared name of a named top-level item, if any."""
+    name = node.child_by_field_name("name")
+    if name is not None:
+        return source[name.start_byte:name.end_byte].decode("utf-8", "replace")
+    for child in node.children:
+        if child.type in ("identifier", "type_identifier"):
+            return source[child.start_byte:child.end_byte].decode("utf-8", "replace")
+    return None
+
+
+def _collect_top_level_item_names(root: Any, source: bytes, exclude: Any) -> List[str]:
+    """Collect names of all top-level structs, enums and functions (in order)."""
+    names: List[str] = []
+    seen: set = set()
+    for child in root.children:
+        if child is exclude:
+            continue
+        if child.type not in _NAMED_ITEM_TYPES:
+            continue
+        name = _item_name(child, source)
+        if name and name not in seen:
+            seen.add(name)
+            names.append(name)
+    return names
+
+
+def heal_pyo3_glob_import(source: bytes, diag: Diagnostic, language: str) -> List[Edit]:
+    """Expand a glob ``use super::*;`` inside a ``#[pymodule]`` into named imports.
+
+    PyO3's declarative ``#[pymodule]`` macro rejects glob re-exports.  This locates
+    the ``#[pymodule]`` block via Tree-sitter, finds the recursive wildcard
+    statement (``use super::*;``), queries the outer file's AST for every
+    top-level structure / enum / function, and rewrites the glob into an explicit
+    named import map: ``use super::{ItemA, ItemB, ItemC};``.
+    """
+    if language != "rust":
+        return []
+
+    from tree_sitter import Parser
+
+    lang_obj = _load_language("rust")
+    root = Parser(lang_obj).parse(source).root_node
+
+    pymodule = _find_pymodule_item(root, source)
+    if pymodule is None:
+        return []
+
+    glob = _find_super_glob_use(pymodule, source)
+    if glob is None:
+        return []
+
+    names = _collect_top_level_item_names(root, source, exclude=pymodule)
+    if not names:
+        return []
+
+    replacement = "use super::{" + ", ".join(names) + "};"
+    return [Edit(glob.start_byte, glob.end_byte, replacement)]
 
 
 def heal_unresolved_parent_import(source: bytes, diag: Diagnostic, language: str) -> List[Edit]:
@@ -632,6 +811,8 @@ def _plan_edits(source: bytes, diags: Sequence[Diagnostic], language: str,
             new = heal_unresolved_parent_import(source, diag, language)
         elif category == Category.MISMATCHED_SLICE_TYPE:
             new = heal_mismatched_slice_type(source, diag, language)
+        elif category == Category.PYO3_GLOB_IMPORT:
+            new = heal_pyo3_glob_import(source, diag, language)
         else:
             new = []
         for edit in new:

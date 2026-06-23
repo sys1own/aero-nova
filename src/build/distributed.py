@@ -130,6 +130,9 @@ class LocalBackend(WorkerBackend):
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 check=False,
+                # Inherit the full parent environment so build limits
+                # (CARGO_BUILD_JOBS, codegen-units) and compiler paths survive.
+                env=os.environ.copy(),
             )
         except (OSError, subprocess.SubprocessError) as exc:
             return BuildResult(
