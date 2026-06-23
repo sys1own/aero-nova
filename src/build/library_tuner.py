@@ -402,6 +402,9 @@ class LibraryTuner:
                 stderr=subprocess.PIPE,
                 timeout=timeout,
                 check=False,
+                # Inherit the full parent environment so toolchain probes see the
+                # same compiler paths and configuration as the real build.
+                env=os.environ.copy(),
             )
         except (OSError, subprocess.SubprocessError):
             return None

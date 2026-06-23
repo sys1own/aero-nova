@@ -17,9 +17,11 @@ from core.toolchain.self_healing import (
     _plan_edits,
     categorize,
     flag_healing_failure,
+    heal_duplicate_definition,
     heal_missing_crate,
     heal_mismatched_slice_type,
     heal_module,
+    heal_pyo3_glob_import,
     make_rust_build_fn,
     parse_rustc_json,
 )
@@ -428,6 +430,66 @@ class TestManifestRollback(unittest.TestCase):
         self.assertTrue(report.rolled_back)
         # Cargo.toml must be restored to its original state (features intact).
         self.assertEqual(cargo.read_text(), original_cargo)
+
+
+class TestPyo3GlobImport(unittest.TestCase):
+    def test_categorize_glob_import(self):
+        d = Diagnostic(
+            "#[pymodule] cannot import glob statements", "lib.rs", severity="error"
+        )
+        self.assertEqual(categorize(d), Category.PYO3_GLOB_IMPORT)
+
+    def test_expands_glob_to_named_imports(self):
+        src = (
+            b"use pyo3::prelude::*;\n"
+            b"struct Alpha;\n"
+            b"enum Beta { A, B }\n"
+            b"fn gamma() {}\n"
+            b"#[pymodule]\n"
+            b"mod my_ext {\n"
+            b"    use super::*;\n"
+            b"}\n"
+        )
+        d = Diagnostic("#[pymodule] cannot import glob statements", "lib.rs")
+        edits = heal_pyo3_glob_import(src, d, "rust")
+        out = _apply_edits(src, edits).decode()
+        self.assertIn("use super::{Alpha, Beta, gamma};", out)
+        self.assertNotIn("use super::*;", out)
+
+    def test_no_pymodule_is_noop(self):
+        src = b"fn x() {}\nmod m { use super::*; }\n"
+        d = Diagnostic("#[pymodule] cannot import glob statements", "lib.rs")
+        self.assertEqual(heal_pyo3_glob_import(src, d, "rust"), [])
+
+    def test_non_rust_is_noop(self):
+        d = Diagnostic("#[pymodule] cannot import glob statements", "lib.rs")
+        self.assertEqual(heal_pyo3_glob_import(b"x", d, "python"), [])
+
+
+class TestTypeAwareDuplicate(unittest.TestCase):
+    def test_renames_2d_matrix_variant(self):
+        src = (
+            b"fn build_unitary() -> Vec<Complex> { vec![] }\n"
+            b"fn build_unitary() -> [[Complex; 4]; 4] { [[Complex; 4]; 4] }\n"
+        )
+        d = Diagnostic(
+            "the name `build_unitary` is defined multiple times",
+            "lib.rs", code="E0428",
+        )
+        edits = heal_duplicate_definition(src, d, "rust")
+        out = _apply_edits(src, edits).decode()
+        # The flat Vec variant is preserved; the 2D variant is deprecated.
+        self.assertIn("fn build_unitary() -> Vec<Complex>", out)
+        self.assertIn("fn build_unitary_legacy() -> [[Complex; 4]; 4]", out)
+
+    def test_fallback_comments_out_when_not_type_discriminable(self):
+        src = b"fn foo() {}\nfn foo() {}\n"
+        d = Diagnostic(
+            "the name `foo` is defined multiple times", "lib.rs", code="E0428",
+        )
+        edits = heal_duplicate_definition(src, d, "rust")
+        out = _apply_edits(src, edits).decode()
+        self.assertIn("auto-healed: duplicate removed", out)
 
 
 if __name__ == "__main__":

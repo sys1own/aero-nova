@@ -187,6 +187,9 @@ class GPUPipeline:
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     check=False,
+                    # Inherit the full parent environment so custom compiler
+                    # paths and build limits are never dropped.
+                    env=os.environ.copy(),
                 )
                 results.append(
                     KernelCompileResult(

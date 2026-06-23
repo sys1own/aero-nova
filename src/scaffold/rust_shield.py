@@ -147,8 +147,38 @@ class RustSemanticShield:
         if aligned:
             report.applied.append(f"type-cascade-alignment(usize x{aligned})")
 
+        if "pyo3" in anchors:
+            source, expanded = self.expand_pymodule_globs(source)
+            if expanded:
+                report.applied.append("pymodule-glob-expansion")
+
         report.source = source
         return report
+
+    def expand_pymodule_globs(self, source: str) -> Tuple[str, bool]:
+        """Rewrite ``use super::*;`` inside a ``#[pymodule]`` into named imports.
+
+        PyO3's declarative ``#[pymodule]`` macro rejects glob re-exports, so the
+        wildcard is expanded pre-emptively into an explicit named import map of
+        every top-level structure / enum / function.  Delegates to the
+        structural self-healing matrix so there is one source of truth for the
+        Tree-sitter rewrite.  Idempotent and a no-op when Tree-sitter is
+        unavailable or no glob is present.
+        """
+        try:
+            from core.toolchain.self_healing import Diagnostic, heal_pyo3_glob_import
+
+            data = source.encode("utf-8")
+            diag = Diagnostic("#[pymodule] cannot import glob statements", "lib.rs")
+            edits = heal_pyo3_glob_import(data, diag, "rust")
+            if not edits:
+                return source, False
+            for edit in sorted(edits, key=lambda e: e.start, reverse=True):
+                data = data[: edit.start] + edit.text.encode("utf-8") + data[edit.end :]
+            return data.decode("utf-8"), True
+        except Exception:
+            # Tree-sitter not installed / parse failure -> leave source untouched.
+            return source, False
 
     def inject_extension_traits(self, source: str) -> Tuple[str, bool]:
         """Prepend the compatibility traits, after crate-level inner attributes.

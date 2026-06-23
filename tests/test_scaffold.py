@@ -156,6 +156,21 @@ class TestRustShield(unittest.TestCase):
         self.assertIn("AeroNegMutExt", report.source)
         self.assertTrue(any("extension-traits" in a for a in report.applied))
 
+    def test_pymodule_glob_expansion(self):
+        src = (
+            "use pyo3::prelude::*;\n"
+            "struct Alpha;\n"
+            "fn beta() {}\n"
+            "#[pymodule]\n"
+            "mod ext {\n"
+            "    use super::*;\n"
+            "}\n"
+        )
+        report = self.shield.apply(src)
+        self.assertIn("use super::{Alpha, beta};", report.source)
+        self.assertNotIn("use super::*;", report.source)
+        self.assertTrue(any("pymodule-glob" in a for a in report.applied))
+
     def test_named_shim_pyo3_usize_alignment(self):
         src = "    let q_dim = match sec { 0 => 2, _ => 5 };\n"
         report = self.shield.apply(src, compatibility_shims=["pyo3_usize_alignment"])
@@ -222,7 +237,10 @@ class TestRepoGenerator(_Tmp):
         deps = infer_dependencies(RUG_PYO3_SOURCE)
         self.assertIn("rug", deps)
         self.assertIn("pyo3", deps)
-        self.assertEqual(deps["pyo3"]["features"], ["extension-module"])
+        self.assertEqual(
+            deps["pyo3"]["features"],
+            ["extension-module", "experimental-declarative-modules"],
+        )
 
     def test_infer_dependencies_override(self):
         deps = infer_dependencies(RUG_PYO3_SOURCE, overrides={"rug": "0.22"})
@@ -248,7 +266,10 @@ class TestRepoGenerator(_Tmp):
         self.assertEqual(names, {"Cargo.toml", "src/lib.rs", ".gitignore", "README.md", "test_binding.py"})
         root = self.tmp / "repo"
         self.assertIn("crate-type = [\"cdylib\"]", (root / "Cargo.toml").read_text())
-        self.assertIn('features = ["extension-module"]', (root / "Cargo.toml").read_text())
+        self.assertIn(
+            'features = ["extension-module", "experimental-declarative-modules"]',
+            (root / "Cargo.toml").read_text(),
+        )
         self.assertIn("/target/", (root / ".gitignore").read_text())
         self.assertIn("build_artifacts/", (root / ".gitignore").read_text())
         self.assertIn("anyon_sim", (root / "test_binding.py").read_text())
