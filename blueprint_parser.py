@@ -952,6 +952,7 @@ def _parse_toml_native_blueprint(content: str, project_root: str) -> Dict[str, A
                 "path": entry.path,
                 "language": entry.language,
                 "preserve_original_logic": entry.preserve_original_logic,
+                "target_output_language": entry.target_output_language,
             }
             for name, entry in bp.context_registry.items()
         },

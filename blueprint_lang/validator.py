@@ -78,6 +78,10 @@ SCHEMAS: Dict[str, BlockSchema] = {
             # "native" | "size", or rustflags = ["-C", "target-cpu=generic"].
             "optimization": _STRING,
             "rustflags": _STRING_LIST,
+            # Polyglot code generation: when set, the emitter translates the
+            # UAST into this target language instead of compiling in the source
+            # language.  Must be one of the SUPPORTED_LANGUAGES.
+            "target_output_language": _STRING,
         },
         required=("language", "sources"),
     ),
@@ -313,6 +317,19 @@ class Validator:
                         sources.value.span,
                         label="this list is empty",
                         hint="list at least one source file or glob, e.g. [\"src/**/*.py\"]",
+                    )
+                )
+
+        target_output = block.get("target_output_language")
+        if target_output is not None and isinstance(target_output.value, StringValue):
+            out_lang = target_output.value.value
+            if out_lang not in SUPPORTED_LANGUAGES:
+                errors.append(
+                    BlueprintValidationError(
+                        f"unsupported target_output_language '{out_lang}'",
+                        target_output.value.span,
+                        label="not a supported output language",
+                        hint=f"supported languages are {_quote_join(list(SUPPORTED_LANGUAGES))}",
                     )
                 )
 
