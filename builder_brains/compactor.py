@@ -617,7 +617,9 @@ class TwoTieredStructuralMerger:
             if original_source.endswith('\n') or synthesized_source.endswith('\n')
             else ''
         )
-        return '\n'.join(merged) + trailing if merged else trailing
+        result = '\n'.join(merged) + trailing if merged else trailing
+        # Post-processing: remove redundant pass statements left by lookahead.
+        return self.strip_redundant_pass(result)
 
     def _align_trivia_blocks(
         self, original_lines: List[str], synthesized_lines: List[str]
@@ -646,3 +648,110 @@ class TwoTieredStructuralMerger:
         ]
 
         return deduped_comments + synthesized_lines
+
+    # ------------------------------------------------------------------ #
+    # Redundant `pass` removal
+    # ------------------------------------------------------------------ #
+    def strip_redundant_pass(self, source: str) -> str:
+        """Remove redundant ``pass`` statements left behind by lookahead injection.
+
+        Two patterns are detected and cleaned:
+
+          1. **Inline pass after a colon** — e.g. ``def fn(): pass`` where a valid
+             indented child statement exists on the very next non-blank line.
+          2. **Standalone pass line** within a block body that contains at least
+             one other executable (non-comment, non-blank, non-pass) statement.
+
+        Comments and surrounding spacing are preserved.
+        """
+        lines = source.splitlines(keepends=True)
+        lines = self._strip_inline_pass(lines)
+        lines = self._strip_standalone_pass(lines)
+        return "".join(lines)
+
+    @staticmethod
+    def _strip_inline_pass(lines: List[str]) -> List[str]:
+        """Remove trailing `` pass`` from colon-terminated headers when a body follows.
+
+        Matches patterns like ``def fn(): pass`` or ``class C: pass`` where the
+        subsequent non-blank line is an indented child statement.
+        """
+        result: List[str] = []
+        i = 0
+        n = len(lines)
+        # Pattern: a line ending with `: pass` (possibly with trailing whitespace/newline)
+        # followed by a non-blank line at deeper indentation.
+        _COLON_PASS_RE = re.compile(
+            r'^(\s*(?:def|async\s+def|class|if|elif|else|for|while|with|try|except|finally)\b.+):\s*pass\s*$'
+        )
+        while i < n:
+            line_text = lines[i]
+            match = _COLON_PASS_RE.match(line_text.rstrip('\n\r'))
+            if match:
+                header_indent = len(line_text) - len(line_text.lstrip())
+                # Look ahead for the next non-blank line.
+                j = i + 1
+                while j < n and lines[j].strip() == '':
+                    j += 1
+                if j < n:
+                    next_indent = len(lines[j]) - len(lines[j].lstrip())
+                    next_stripped = lines[j].strip()
+                    if next_indent > header_indent and next_stripped and not next_stripped.startswith('#'):
+                        # Valid child exists: remove the inline pass.
+                        cleaned = match.group(1) + ':\n'
+                        result.append(cleaned)
+                        i += 1
+                        continue
+            result.append(line_text)
+            i += 1
+        return result
+
+    @staticmethod
+    def _strip_standalone_pass(lines: List[str]) -> List[str]:
+        """Remove standalone ``pass`` lines that are redundant within their block.
+
+        A standalone ``pass`` (at a given indent level) is redundant when there
+        is at least one other non-blank, non-comment statement at the same indent
+        level within the same logical block (between the previous block header
+        and the next statement at a shallower indent).
+        """
+        result: List[str] = []
+        n = len(lines)
+        i = 0
+        while i < n:
+            stripped = lines[i].strip()
+            if stripped == 'pass':
+                pass_indent = len(lines[i]) - len(lines[i].lstrip())
+                # Scan the surrounding block for sibling statements at the same
+                # indent level.
+                has_sibling = False
+                # Look backward (skip blanks/comments).
+                for k in range(i - 1, -1, -1):
+                    k_stripped = lines[k].strip()
+                    if not k_stripped or k_stripped.startswith('#'):
+                        continue
+                    k_indent = len(lines[k]) - len(lines[k].lstrip())
+                    if k_indent == pass_indent and k_stripped != 'pass':
+                        has_sibling = True
+                        break
+                    if k_indent < pass_indent:
+                        break
+                # Look forward.
+                if not has_sibling:
+                    for k in range(i + 1, n):
+                        k_stripped = lines[k].strip()
+                        if not k_stripped or k_stripped.startswith('#'):
+                            continue
+                        k_indent = len(lines[k]) - len(lines[k].lstrip())
+                        if k_indent == pass_indent and k_stripped != 'pass':
+                            has_sibling = True
+                            break
+                        if k_indent < pass_indent:
+                            break
+                if has_sibling:
+                    # Redundant pass — drop the line.
+                    i += 1
+                    continue
+            result.append(lines[i])
+            i += 1
+        return result
