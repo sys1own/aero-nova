@@ -65,6 +65,7 @@ class ContextEntry:
     dialect: str = ""
     preserve_original_logic: bool = False
     integration_mode: str = ""
+    target_output_language: str = ""
 
     @classmethod
     def from_dict(cls, name: str, data: Mapping[str, Any]) -> "ContextEntry":
@@ -75,6 +76,7 @@ class ContextEntry:
             dialect=str(data.get("dialect", "")),
             preserve_original_logic=bool(data.get("preserve_original_logic", False)),
             integration_mode=str(data.get("integration_mode", "")),
+            target_output_language=str(data.get("target_output_language", "")),
         )
 
 

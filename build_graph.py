@@ -46,6 +46,8 @@ class TargetNode:
     # RUSTFLAGS control: an optimization word and/or explicit rustflags.
     optimization: Optional[str] = None
     rustflags: List[str] = field(default_factory=list)
+    # Polyglot emitter: translate UAST into this language instead of compiling.
+    target_output_language: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         d: Dict[str, Any] = {
@@ -72,6 +74,8 @@ class TargetNode:
             d["optimization"] = self.optimization
         if self.rustflags:
             d["rustflags"] = self.rustflags
+        if self.target_output_language:
+            d["target_output_language"] = self.target_output_language
         return d
 
 
@@ -297,6 +301,7 @@ def blueprint_to_dag(blueprint: Blueprint) -> BuildGraph:
             cargo_dependencies=_extract_string_list(block, "cargo_dependencies"),
             optimization=_extract_string(block, "optimization") or None,
             rustflags=_extract_string_list(block, "rustflags"),
+            target_output_language=_extract_string(block, "target_output_language") or None,
         )
         targets[node.name] = node
         dep_map[node.name] = requires
