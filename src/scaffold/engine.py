@@ -19,7 +19,12 @@ from src.scaffold.decomposition import (
     ModularDecomposer,
     merge_source_asts,
 )
-from src.scaffold.language_router import is_python, resolve_target_language
+from src.scaffold.language_router import (
+    cargo_bypass_warning,
+    is_native_crate_language,
+    is_python,
+    resolve_target_language,
+)
 from src.scaffold.python_repo_generator import (
     PythonGeneratedRepo,
     build_python_spec,
@@ -213,7 +218,23 @@ class ScaffoldEngine:
 
         build_info: Optional[Dict[str, Any]] = None
         merge_info: Optional[Dict[str, Any]] = None
-        if build:
+        # Strict Rust routing gate: the low-level cargo build path is reserved
+        # for genuine Rust crate targets.  Only run the compilation sequence when
+        # the resolved source language is 'rust'; any other target (c/cpp/
+        # fortran/shell/unknown that fell through to this path) bypasses cargo
+        # cleanly instead of triggering spurious Cargo errors.
+        resolved = entry.language
+        if build and not is_native_crate_language(resolved):
+            warning = cargo_bypass_warning(resolved)
+            self._log(warning)
+            build_info = {
+                "succeeded": True,
+                "bypassed": True,
+                "language": resolved,
+                "warning": warning,
+                "attempts": [],
+            }
+        elif build:
             build_info = self._build_rust_with_recovery(repo).to_dict()
             build_info["language"] = "rust"
             if merge_active:

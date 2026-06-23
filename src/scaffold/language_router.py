@@ -60,6 +60,25 @@ def is_python(language: str) -> bool:
     return language == "python"
 
 
+def is_native_crate_language(language: str) -> bool:
+    """Strict gate: only ``rust`` is a valid low-level cargo (crate) target.
+
+    The scaffold/self-hosting engine restricts its ``cargo build`` path to
+    genuine Rust crate components.  Any other resolved language (python is
+    handled by its own workspace path; c/cpp/fortran/shell/unknown fall here)
+    must bypass the cargo build loop rather than emit spurious Cargo errors.
+    """
+    return language == "rust"
+
+
+def cargo_bypass_warning(language: str) -> str:
+    """The route warning emitted when a non-Rust target skips the cargo layer."""
+    return (
+        f"language router -> '{language}' "
+        "(Bypassing Rust cargo build layer; target is not a native crate component)"
+    )
+
+
 def layout_description(language: str) -> str:
     """Human-readable summary of the files synthesised for a language."""
     if is_python(language):
