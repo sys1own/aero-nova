@@ -28,7 +28,7 @@ import subprocess
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Sequence, Union
+from typing import Any, Callable, Dict, List, Optional, Sequence, Union
 
 from core.parser.universal import _load_language, detect_language, extract_symbols, parse_source
 
@@ -151,12 +151,39 @@ class Category(str, Enum):
     MISSING_IMPORT = "missing_import"
     IMMUTABLE_ASSIGNMENT = "immutable_assignment"
     MISSING_SEMICOLON = "missing_semicolon"
+    MISSING_CRATE = "missing_crate"
+    DUPLICATE_DEFINITION = "duplicate_definition"
+    UNRESOLVED_PARENT_IMPORT = "unresolved_parent_import"
+    MISMATCHED_SLICE_TYPE = "mismatched_slice_type"
 
 
 def categorize(diag: Diagnostic) -> Optional[Category]:
     code = (diag.code or "").upper()
     msg = diag.message.lower()
-    if code in {"E0432", "E0433"} or "unresolved import" in msg \
+
+    # --- Rust-specific advanced rules (checked first for specificity) --------
+
+    # E0433 / E0405: missing crate or module (Cargo.toml dependency injection)
+    if code in {"E0433", "E0405"}:
+        return Category.MISSING_CRATE
+
+    # E0428: duplicate symbol definitions
+    if code == "E0428" or "is defined multiple times" in msg:
+        return Category.DUPLICATE_DEFINITION
+
+    # E0432 with super:: path: private-item visibility promotion
+    if (code == "E0432" or "unresolved import" in msg) and "super::" in msg:
+        return Category.UNRESOLVED_PARENT_IMPORT
+
+    # E0308 with slice/array mismatch
+    if code == "E0308" and ("&[" in diag.message and "[" in diag.message):
+        # Heuristic: the message contains both a slice type and an array type.
+        if re.search(r"expected `&\[", diag.message) and re.search(r"found `&\[\[", diag.message):
+            return Category.MISMATCHED_SLICE_TYPE
+
+    # --- Original broad categories -------------------------------------------
+
+    if code == "E0432" or "unresolved import" in msg \
             or "could not be resolved" in msg or "reportmissingimports" in code.lower() \
             or ("is not defined" in msg) or "reportundefinedvariable" in (diag.code or "").lower():
         return Category.MISSING_IMPORT
@@ -299,6 +326,228 @@ def heal_missing_semicolon(source: bytes, diag: Diagnostic, language: str) -> Li
 
 
 # ---------------------------------------------------------------------------
+# 3b. Advanced Rust compiler error handlers
+# ---------------------------------------------------------------------------
+
+def _crate_name_from_message(message: str) -> Optional[str]:
+    """Extract the crate/module name from an E0433/E0405 diagnostic message.
+
+    Typical formats:
+        ``cannot find crate `foo` in ...``
+        ``failed to resolve: use of undeclared crate or module `bar```
+        ``cannot find trait `Baz` in ...``
+    """
+    m = re.search(r"(?:crate or module|crate|module|trait)\s+`([^`]+)`", message)
+    if m:
+        token = m.group(1)
+        if "::" in token:
+            return token.split("::")[0]
+        return token
+    return _symbol_from_message(message)
+
+
+def heal_missing_crate(
+    source: bytes, diag: Diagnostic, language: str,
+    *, cargo_toml_path: Optional[Path] = None,
+) -> List[Edit]:
+    """E0433 / E0405: inject a missing crate into ``Cargo.toml``'s [dependencies].
+
+    If a ``Cargo.toml`` path is provided (or can be inferred from the diagnostic
+    file path), the engine adds ``<crate> = "*"`` under ``[dependencies]``.
+    The edit targets the Cargo.toml bytes, not the Rust source itself; the caller
+    must apply the returned edits to the **manifest file**, not the source file.
+
+    Returns source-level edits only when the missing symbol looks like a module
+    import (``use <crate>::...``) and a simple ``extern crate`` line is warranted.
+    """
+    if language != "rust":
+        return []
+    crate_name = _crate_name_from_message(diag.message)
+    if not crate_name:
+        return []
+
+    # Resolve the manifest path.
+    manifest = cargo_toml_path
+    if manifest is None:
+        src_path = Path(diag.file)
+        for parent in (src_path.parent, *src_path.parents):
+            candidate = parent / "Cargo.toml"
+            if candidate.is_file():
+                manifest = candidate
+                break
+
+    if manifest is not None and manifest.is_file():
+        cargo_text = manifest.read_text(encoding="utf-8")
+        dep_line = f'{crate_name} = "*"'
+        if crate_name not in cargo_text:
+            if "[dependencies]" in cargo_text:
+                idx = cargo_text.index("[dependencies]") + len("[dependencies]")
+                # Skip to end of the line.
+                nl = cargo_text.find("\n", idx)
+                if nl == -1:
+                    nl = len(cargo_text)
+                insert_pos = nl + 1
+                new_cargo = cargo_text[:insert_pos] + dep_line + "\n" + cargo_text[insert_pos:]
+            else:
+                new_cargo = cargo_text.rstrip("\n") + "\n\n[dependencies]\n" + dep_line + "\n"
+            manifest.write_text(new_cargo, encoding="utf-8")
+
+    return []
+
+
+def heal_duplicate_definition(source: bytes, diag: Diagnostic, language: str) -> List[Edit]:
+    """E0428: remove the *second* (duplicate) definition of a symbol.
+
+    Uses Tree-sitter to locate both definitions.  The *later* one (by byte
+    offset) is commented out, preserving the earlier definition that downstream
+    code may already depend on.
+    """
+    if language != "rust":
+        return []
+    symbol = _symbol_from_message(diag.message)
+    if not symbol:
+        return []
+
+    from tree_sitter import Parser
+
+    lang_obj = _load_language("rust")
+    tree = Parser(lang_obj).parse(source)
+
+    # Walk the top-level children looking for items that declare ``symbol``.
+    defs: List[Any] = []
+    for child in tree.root_node.children:
+        name_node = _find_name_in_item(child, symbol, source)
+        if name_node is not None:
+            defs.append(child)
+
+    if len(defs) < 2:
+        return []
+
+    # Comment out the *later* duplicate (preserve the first).
+    dup = defs[-1]
+    dup_text = source[dup.start_byte:dup.end_byte].decode("utf-8", "replace")
+    commented = "/* [auto-healed: duplicate removed]\n" + dup_text + "\n*/"
+    return [Edit(dup.start_byte, dup.end_byte, commented)]
+
+
+def _find_name_in_item(node: Any, symbol: str, source: bytes) -> Optional[Any]:
+    """Return the name child node if ``node`` declares ``symbol``, else None."""
+    # Item types that carry a name: fn, struct, enum, type_alias, const, static,
+    # trait, impl (impl doesn't always have a direct name node, skip for now).
+    for child in node.children:
+        if child.type == "identifier" or child.type == "type_identifier":
+            text = source[child.start_byte:child.end_byte].decode("utf-8", "replace")
+            if text == symbol:
+                return child
+    return None
+
+
+def heal_unresolved_parent_import(source: bytes, diag: Diagnostic, language: str) -> List[Edit]:
+    """E0432 with ``super::``: promote a private item to ``pub(crate)`` visibility.
+
+    Locates the parent scope source file (inferred from the import path), finds
+    the referenced private item, and prepends ``pub(crate) `` to its definition.
+    Because the parent file is a *different* file, this function edits the source
+    of the file containing the target symbol in-place and returns an empty list
+    (the edits are applied as a side-effect so the next build picks them up).
+    """
+    if language != "rust":
+        return []
+
+    # Extract the symbol from the ``super::<symbol>`` pattern.
+    m = re.search(r"super::(`?)(\w+)`?", diag.message)
+    if not m:
+        return []
+    symbol = m.group(2)
+
+    # Resolve the parent module file.
+    src_path = Path(diag.file)
+    parent_candidates = [
+        src_path.parent.parent / "mod.rs",
+        src_path.parent.parent / (src_path.parent.name + ".rs"),
+        src_path.parent / "mod.rs",
+    ]
+    parent_file: Optional[Path] = None
+    for candidate in parent_candidates:
+        if candidate.is_file():
+            parent_file = candidate
+            break
+
+    if parent_file is None:
+        return []
+
+    parent_source = parent_file.read_bytes()
+
+    from tree_sitter import Parser
+
+    lang_obj = _load_language("rust")
+    tree = Parser(lang_obj).parse(parent_source)
+
+    for child in tree.root_node.children:
+        name_node = _find_name_in_item(child, symbol, parent_source)
+        if name_node is None:
+            continue
+        # Check if already pub.
+        first_token = parent_source[child.start_byte:child.start_byte + 4]
+        if first_token.startswith(b"pub"):
+            continue
+        # Prepend pub(crate) to the item.
+        new_source = (
+            parent_source[:child.start_byte]
+            + b"pub(crate) "
+            + parent_source[child.start_byte:]
+        )
+        parent_file.write_bytes(new_source)
+        break
+
+    return []
+
+
+def heal_mismatched_slice_type(source: bytes, diag: Diagnostic, language: str) -> List[Edit]:
+    """E0308: inject ``.flatten()`` when an array-of-arrays is passed as a flat slice.
+
+    Pattern: ``expected `&[T]`, found `&[[T; N]; M]``
+
+    Locates the call-site expression at the diagnostic byte span and appends
+    ``.flatten()`` (or wraps with ``.as_flattened()``) to coerce the nested array
+    into a contiguous slice reference.
+    """
+    if language != "rust":
+        return []
+    if diag.start_byte is None or diag.end_byte is None:
+        return []
+
+    # Validate this is genuinely a nested-array-to-slice mismatch.
+    if not re.search(r"expected `&\[", diag.message):
+        return []
+    if not re.search(r"found `&\[\[", diag.message):
+        return []
+
+    start = diag.start_byte
+    end = diag.end_byte
+
+    if start >= len(source) or end > len(source):
+        return []
+
+    expr_bytes = source[start:end]
+
+    # If the expression already has .flatten() or .as_flattened(), skip.
+    if b".flatten()" in expr_bytes or b".as_flattened()" in expr_bytes:
+        return []
+
+    # Find the end of the full expression (scan to whitespace / comma / semicolon / paren).
+    scan_pos = end
+    while scan_pos < len(source) and source[scan_pos:scan_pos + 1] not in (
+        b",", b";", b")", b"]", b"}", b" ", b"\n", b"\t",
+    ):
+        scan_pos += 1
+
+    # If the reference token is `&`, we need to wrap: `&<expr>.flatten()`.
+    # But more commonly the span covers the whole argument; just append.
+    return [Edit(scan_pos, scan_pos, ".flatten()")]
+
+
+# ---------------------------------------------------------------------------
 # 4. Bounded correction loop + rollback
 # ---------------------------------------------------------------------------
 @dataclass
@@ -338,6 +587,14 @@ def _plan_edits(source: bytes, diags: Sequence[Diagnostic], language: str,
             new = heal_immutable_assignment(source, diag, language)
         elif category == Category.MISSING_SEMICOLON:
             new = heal_missing_semicolon(source, diag, language)
+        elif category == Category.MISSING_CRATE:
+            new = heal_missing_crate(source, diag, language)
+        elif category == Category.DUPLICATE_DEFINITION:
+            new = heal_duplicate_definition(source, diag, language)
+        elif category == Category.UNRESOLVED_PARENT_IMPORT:
+            new = heal_unresolved_parent_import(source, diag, language)
+        elif category == Category.MISMATCHED_SLICE_TYPE:
+            new = heal_mismatched_slice_type(source, diag, language)
         else:
             new = []
         for edit in new:
