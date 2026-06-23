@@ -124,5 +124,3 @@ python main.py cache clear
 ## 📄 License
 
 This framework is open-source software distributed under the terms of the MIT License.
-
-```
