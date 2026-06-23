@@ -1441,6 +1441,7 @@ def scaffold_command(args: argparse.Namespace) -> int:
             dependencies=deps or None,
             build=bool(getattr(args, "build", False)),
             keep=True if args.distribution_directory else not getattr(args, "no_keep", False),
+            merge_active=bool(getattr(args, "merge_active", False)),
         )
     except SourceEntryNotFound as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -1467,7 +1468,16 @@ def scaffold_command(args: argparse.Namespace) -> int:
         status = "succeeded" if build["succeeded"] else "failed"
         note = " (recovered after auto-correction)" if build.get("recovered") else ""
         print(f"  build            : {status}{note} in {len(build['attempts'])} attempt(s)")
+    if result.merge is not None:
+        merge = result.merge
+        if merge.get("merged"):
+            live = "loaded live in-process" if merge.get("loaded") else "staged for next start"
+            print(f"  active merge     : {merge['module_name']} -> {merge['destination']} ({live})")
+        else:
+            print(f"  active merge     : skipped — {merge.get('reason', 'unavailable')}")
     print(f"\n  Push it as-is:  cd {result.workspace} && git init && git add . && git commit -m 'init'")
+    if result.merge is not None and result.merge.get("merged"):
+        print(f"  Now importable:  python3 -c \"import {result.merge['module_name']}\"")
     return 0 if (result.build is None or result.build["succeeded"]) else 1
 
 
@@ -1729,6 +1739,11 @@ def create_parser() -> argparse.ArgumentParser:
         help="Override/add a dependency: --dep rug=1.24 (repeatable)",
     )
     scaffold_parser.add_argument("--build", action="store_true", help="Also compile the repo via cargo (with recovery)")
+    scaffold_parser.add_argument(
+        "--merge-active", action="store_true",
+        help="After a successful --build, copy the compiled .so/.dylib into AeroNova's "
+             "live core/extensions/ layer and load it so the component is instantly importable",
+    )
     scaffold_parser.add_argument("--no-keep", action="store_true", help="Delete the temp workspace afterwards")
     scaffold_parser.add_argument("--verbose", action="store_true", help="Print each scaffolding step")
     scaffold_parser.set_defaults(handler=scaffold_command)
