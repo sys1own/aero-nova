@@ -1,0 +1,111 @@
+# =============================================================================
+# AeroNova Self-Hosting Blueprint
+# =============================================================================
+#
+# This blueprint registers AeroNova's own internal architecture as the primary
+# compilation target, enabling a self-hosting optimization loop.  Developers
+# can drop custom modules into src/ or builder_brains/ and compile them back
+# into the tool itself.
+#
+# Run the self-hosting build:
+#
+#   python main.py build --blueprint self_host.aero --bootstrap-active
+#
+# Validate this file before committing:
+#
+#   python main.py check --blueprint self_host.aero
+#
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# System / Project Metadata
+# ---------------------------------------------------------------------------
+# Declares the self-hosting project identity.  The "bootstrap" strategy tells
+# the orchestrator that the compilation targets overlap with the tool's own
+# runtime, so all mutations are routed through the shadow staging area
+# (.aero/bootstrap_stage/) before the atomic swap pass.
+
+project "aero-nova-self-host" {
+    version     = "1.0.0"
+    description = "Self-hosting bootstrap blueprint — AeroNova compiles itself"
+    authors     = ["AeroNova Maintainers <maintainers@aero-nova.dev>"]
+}
+
+# ---------------------------------------------------------------------------
+# Target: Core Coordination Entrypoints
+# ---------------------------------------------------------------------------
+# Ingests main.py and orchestrator.py — the top-level CLI dispatcher and the
+# multi-agent Cortex pipeline coordinator.  These are the first files the
+# bootstrap cycle analyses for dead-code elimination and call-graph pruning.
+#
+# HOW TO EXTEND:
+#   1. Add a new CLI sub-command handler in main.py.
+#   2. Wire it into the orchestrator DAG in orchestrator.py.
+#   3. Re-run:  python main.py build --blueprint self_host.aero --bootstrap-active
+#      The bootstrap staging guard will validate your changes in isolation
+#      before swapping them into the live tree.
+
+target "core_coordination" {
+    language = "python"
+    sources  = ["main.py", "orchestrator.py"]
+    flags    = ["--strict", "--warn-unreachable"]
+}
+
+# ---------------------------------------------------------------------------
+# Target: Builder Brains — Optimization & Term Rewriting Layer
+# ---------------------------------------------------------------------------
+# Ingests the builder_brains/ package: decision trees, compactor, reflux
+# engine, parameter tuner, experience replay, and code-generation emitters.
+# This is the layer that performs structural mutations on target codebases.
+#
+# HOW TO EXTEND:
+#   1. Drop a new Python module into builder_brains/ (e.g. my_pass.py).
+#   2. Register it in builder_brains/__init__.py if it exposes a public API.
+#   3. Re-run:  python main.py build --blueprint self_host.aero --bootstrap-active
+#      The term rewriting system will pick up new rewrite rules automatically
+#      as long as they follow the standard pass interface.
+
+target "builder_brains" {
+    language = "python"
+    sources  = ["builder_brains/**/*.py"]
+    requires = ["core_coordination"]
+    flags    = ["--strict", "--warn-unreachable"]
+}
+
+# ---------------------------------------------------------------------------
+# Target: Source Platform — Polyglot Toolchain, Proxy & Scaffolding
+# ---------------------------------------------------------------------------
+# Ingests the src/ tree: semantic analysis, LSP proxy, build drivers,
+# precision shield, hardware profiling, decomposition engine, memoization,
+# evolution subsystem, and all scaffold/registry utilities.
+#
+# HOW TO EXTEND:
+#   1. Create a new sub-package under src/ (e.g. src/my_feature/).
+#   2. Add an __init__.py exposing the public surface.
+#   3. If the feature needs builder_brains passes, add a requires edge above.
+#   4. Re-run:  python main.py build --blueprint self_host.aero --bootstrap-active
+#      The polyglot front-end will index your new module and include it in
+#      the UAST dependency graph for the next optimization cycle.
+
+target "source_platform" {
+    language = "python"
+    sources  = ["src/**/*.py"]
+    requires = ["core_coordination", "builder_brains"]
+    flags    = ["--strict", "--warn-unreachable"]
+}
+
+# ---------------------------------------------------------------------------
+# Scaling Boundaries — Safe Execution Cycle Enforcement
+# ---------------------------------------------------------------------------
+# Conservative thresholds for the self-hosting loop.  Because we are mutating
+# the tool's own source, the limits are tighter than the production defaults
+# to catch regressions early:
+#   - auto_split_threshold: triggers decomposition at 400 lines (vs 500 prod)
+#   - max_module_complexity: ceiling of 12 (vs 15 prod) to keep passes simple
+#   - hierarchy_depth: 3 levels max to avoid deep abstraction tangles
+
+scaling "self_host" {
+    auto_split_threshold  = 400
+    max_module_complexity = 12
+    hierarchy_depth       = 3
+}
