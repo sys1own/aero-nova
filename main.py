@@ -11,7 +11,7 @@ import orchestrator
 
 logger = logging.getLogger("aero.main")
 
-_BLUEPRINT_CONFIG = Path(__file__).resolve().parent / "blueprint_config.json"
+_BLUEPRINT_CONFIG = Path(__file__).resolve().parent / "tests" / "fixtures" / "blueprint_config.json"
 
 
 def _load_blueprint_config(path: Optional[str] = None) -> dict:
