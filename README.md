@@ -32,7 +32,7 @@ The system runs a Non-Dominated Sorting Genetic Algorithm (**NSGA-II**) across m
         │      ● (Candidate A: Hyper-fast, minimal compaction)
         │     ╱
         │   ● (Candidate B: Balanced Pareto-optimal)
-        │╱
+        │  ╱
         │● (Candidate C: Maximally compacted, slower build)
         └────────────────────────────────────────► [Compression] (Reduced size)
 
