@@ -655,5 +655,112 @@ class TestMultiFileAndShimParsing(unittest.TestCase):
         self.assertFalse(normalized["validation"]["generate_test_shims"])
 
 
+# ---------------------------------------------------------------------------
+# Strict __future__ hoisting (both decomposition engines)
+# ---------------------------------------------------------------------------
+
+# A monolith whose docstring precedes the future statement: when a generator
+# adds its own docstring/imports above the future import, the compiler rejects
+# the result.  ``compile`` (unlike ``ast.parse``) enforces the future position.
+_FUTURE_MONOLITH = '''\
+"""Original monolith docstring."""
+from __future__ import annotations
+
+import os
+import json
+
+GLOBAL = 42
+
+
+class Engine:
+    """An engine."""
+
+    def run(self):
+        return os.getcwd()
+
+
+def helper(payload):
+    return json.dumps(payload)
+'''
+
+
+class TestFutureHoistingScaffold(_Tmp):
+    """ModularDecomposer (src/scaffold/decomposition.py) hoists __future__."""
+
+    def _decompose(self):
+        dest = self.tmp / "scaf"
+        ModularDecomposer(verbose=False).decompose(
+            _FUTURE_MONOLITH,
+            {"engine": ["Engine"], "helpers": ["helper"]},
+            source_filename="main.py",
+            dest_dir=dest,
+        )
+        return dest
+
+    def test_future_is_absolute_first_line(self):
+        dest = self._decompose()
+        for name in ("engine.py", "helpers.py"):
+            text = (dest / name).read_text()
+            self.assertTrue(
+                text.startswith("from __future__ import annotations"),
+                f"{name} must begin with the future import, got:\n{text[:120]}",
+            )
+            # ...and precede the generated banner/docstring + other imports.
+            self.assertLess(text.index("from __future__"), text.index('"""'))
+            self.assertLess(text.index("from __future__"), text.index("import os"))
+
+    def test_generated_modules_compile(self):
+        dest = self._decompose()
+        for name in ("engine.py", "helpers.py"):
+            text = (dest / name).read_text()
+            compile(text, name, "exec")  # raises if the future import is trapped
+
+    def test_future_not_pruned_when_unused(self):
+        dest = self.tmp / "scaf_prune"
+        # `annotations` has no runtime use, so a dead-import pruner would drop it
+        # unless future imports are protected.
+        ModularDecomposer(verbose=False, prune_imports=True).decompose(
+            _FUTURE_MONOLITH,
+            {"engine": ["Engine"]},
+            source_filename="main.py",
+            dest_dir=dest,
+        )
+        text = (dest / "engine.py").read_text()
+        self.assertIn("from __future__ import annotations", text)
+        compile(text, "engine.py", "exec")
+
+
+class TestFutureHoistingSplitter(_Tmp):
+    """decompose_source (src/decomposition/splitter.py) hoists __future__."""
+
+    def _split(self):
+        from src.decomposition.splitter import decompose_source
+
+        src = self.tmp / "mono.py"
+        src.write_text(_FUTURE_MONOLITH)
+        out = self.tmp / "split"
+        result = decompose_source(src, out, min_lines=1)
+        self.assertEqual(result.errors, [])
+        return [Path(p) for p in result.files_written]
+
+    def test_future_is_absolute_first_line(self):
+        for path in self._split():
+            text = path.read_text()
+            self.assertTrue(
+                text.startswith("from __future__ import annotations"),
+                f"{path.name} must begin with the future import, got:\n{text[:120]}",
+            )
+
+    def test_split_modules_compile(self):
+        for path in self._split():
+            compile(path.read_text(), path.name, "exec")
+
+    def test_future_not_duplicated_into_body(self):
+        for path in self._split():
+            text = path.read_text()
+            # Exactly one future statement — hoisted, never also trapped below.
+            self.assertEqual(text.count("from __future__ import annotations"), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
