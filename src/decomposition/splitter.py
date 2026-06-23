@@ -36,6 +36,7 @@ class _ExtractedUnit:
     kind: str  # "class" or "function"
     source: str
     imports: str  # import statements needed by this unit
+    future_imports: str = ""  # `from __future__` compiler flags, hoisted to line 1
 
 
 def _collect_imports(tree: ast.Module) -> str:
@@ -47,12 +48,40 @@ def _collect_imports(tree: ast.Module) -> str:
     return ""
 
 
+def _extract_future_imports(tree: ast.Module, source: str) -> str:
+    """Return the monolith's ``from __future__`` statements (ordered, de-duped).
+
+    These are compiler flags that must occupy the very first lines of any
+    generated module; they are collected from the AST (authoritative) so a
+    parenthesised/multi-line future statement is captured whole.
+    """
+    segments: List[str] = []
+    seen: set = set()
+    for node in ast.iter_child_nodes(tree):
+        if isinstance(node, ast.ImportFrom) and node.module == "__future__":
+            segment = (ast.get_source_segment(source, node) or "").strip()
+            if segment and segment not in seen:
+                seen.add(segment)
+                segments.append(segment)
+    return "\n".join(segments)
+
+
 def _extract_import_block(source: str) -> str:
-    """Extract the leading import block from source text."""
+    """Extract the leading import block from source text.
+
+    ``from __future__`` statements are deliberately excluded here: they are
+    hoisted separately to the absolute top of each generated file so they can
+    never be trapped below the generated docstring/imports (which would raise an
+    unrecoverable ``from __future__ imports must occur at the beginning of the
+    file`` SyntaxError).
+    """
     lines = source.splitlines(keepends=True)
     import_lines: List[str] = []
     for line in lines:
         stripped = line.strip()
+        if stripped.startswith("from __future__"):
+            # Compiler flag — hoisted separately, never duplicated into the body.
+            continue
         if stripped.startswith(("import ", "from ")):
             import_lines.append(line)
         elif stripped.startswith("#") or stripped == "" or stripped.startswith('"""') or stripped.startswith("'''"):
@@ -79,6 +108,7 @@ def _extract_units(source: str, min_lines: int = 5) -> List[_ExtractedUnit]:
 
     lines = source.splitlines(keepends=True)
     import_block = _extract_import_block(source)
+    future_block = _extract_future_imports(tree, source)
     units: List[_ExtractedUnit] = []
 
     for node in ast.iter_child_nodes(tree):
@@ -92,6 +122,7 @@ def _extract_units(source: str, min_lines: int = 5) -> List[_ExtractedUnit]:
                     kind="class",
                     source=body,
                     imports=import_block,
+                    future_imports=future_block,
                 ))
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             start = node.lineno - 1
@@ -104,6 +135,7 @@ def _extract_units(source: str, min_lines: int = 5) -> List[_ExtractedUnit]:
                 kind="function",
                 source=body,
                 imports=import_block,
+                future_imports=future_block,
             ))
 
     return units
@@ -118,7 +150,12 @@ def _write_module(
     file_path = output_dir / f"{module_name}.py"
 
     header = f'"""Auto-decomposed from monolith: {unit.kind} {unit.name}."""\n\n'
-    content = header + unit.imports + "\n\n" + unit.source + "\n"
+    # Strict __future__ hoisting: compiler-flag imports go on the absolute first
+    # lines, ahead of the generated docstring/imports, so they are never trapped
+    # below a statement (which is an unrecoverable SyntaxError).
+    future = unit.future_imports.strip()
+    prologue = f"{future}\n\n" if future else ""
+    content = prologue + header + unit.imports + "\n\n" + unit.source + "\n"
 
     file_path.write_text(content, encoding="utf-8")
     return str(file_path), len(content.encode("utf-8"))
