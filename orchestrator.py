@@ -778,18 +778,81 @@ def _thread_pool_size(metadata: Dict[str, Any], manifest: Dict[str, Any]) -> int
         return 4
 
 
+def _bootstrap_validator(stage_dir: Path) -> Dict[str, Any]:
+    """Validate all Python files in the bootstrap staging directory.
+
+    Performs syntax scanning (AST parse) and structural integrity checks.
+    Returns a dict with ``errors`` and ``anomalies`` counts -- both must be
+    zero for the atomic swap to proceed.
+    """
+    import ast as _ast
+
+    errors = 0
+    anomalies = 0
+    checked = 0
+
+    for py_file in stage_dir.rglob("*.py"):
+        if not py_file.is_file():
+            continue
+        checked += 1
+        source = py_file.read_text(encoding="utf-8", errors="replace")
+        try:
+            _ast.parse(source, filename=str(py_file))
+        except SyntaxError as exc:
+            logger.warning("Bootstrap validation: syntax error in %s: %s", py_file, exc)
+            errors += 1
+
+    # Structural anomaly: no files produced at all is suspicious.
+    if checked == 0:
+        anomalies += 1
+
+    return {"errors": errors, "anomalies": anomalies, "files_checked": checked}
+
+
 def run_build(
     workspace_root: str,
     cycles: int = 3,
     telemetry_interval: float = _DEFAULT_TELEMETRY_INTERVAL,
+    bootstrap_active: bool = False,
 ) -> Dict[str, Any]:
+    from core.bootstrap import (
+        BootstrapStage,
+        detect_self_targeting,
+        is_bootstrap_active,
+        set_bootstrap_active,
+    )
+
     workspace = Path(workspace_root).resolve()
     if not workspace.is_dir():
         raise NotADirectoryError(f"Workspace is not a directory: {workspace}")
 
+    # Recursive loop guard: if already in a bootstrap pass, short-circuit.
+    if bootstrap_active or is_bootstrap_active():
+        logger.warning(
+            "Bootstrap recursion detected — short-circuiting nested build cycle."
+        )
+        return {"short_circuited": True, "reason": "bootstrap_recursion_guard"}
+
     stages = _load_brain_modules()
     manifest = _read_manifest_contract()
     metadata = _extract_build_context(workspace, manifest)
+
+    # Self-targeting detection: collect all target source paths and check for
+    # overlap with the engine's own directory.
+    _target_paths: List[str] = []
+    for t in _ensure_blueprint_target_paths():
+        resolved = _resolve_target_paths(workspace, t)
+        _target_paths.append(str(resolved["source_path"]))
+    self_targeting = detect_self_targeting(_target_paths)
+
+    bootstrap_stage: Optional[BootstrapStage] = None
+    if self_targeting:
+        set_bootstrap_active(True)
+        bootstrap_stage = BootstrapStage(workspace)
+        bootstrap_stage.prepare()
+        metadata["bootstrap_mode"] = True
+        metadata["bootstrap_stage_dir"] = str(bootstrap_stage.stage_dir)
+        logger.info("Self-targeting detected — bootstrap isolation engaged.")
 
     # Dynamically link the blueprint's optimization level to the module-level
     # override so _compile_targets and telemetry read it instead of the static
@@ -886,7 +949,12 @@ def run_build(
                     logger.warning("Decomposition errors: %s", decomp_result["decomposition_errors"])
 
             manifest = _read_manifest_contract()
-            compilation_summary = _compile_targets(workspace, manifest)
+            # When in bootstrap isolation mode, redirect compilation output
+            # to the shadow staging directory instead of the live workspace.
+            compile_root = workspace
+            if bootstrap_stage is not None and bootstrap_stage.is_prepared:
+                compile_root = bootstrap_stage.stage_dir
+            compilation_summary = _compile_targets(compile_root, manifest)
             metadata.update(compilation_summary)
 
             # Merge decomposition output into the compiled/bytes telemetry
@@ -928,6 +996,27 @@ def run_build(
     finally:
         stop_event.set()
         telemetry_thread.join(timeout=1.0)
+
+        # Bootstrap isolation: validate staged output and promote or discard.
+        if bootstrap_stage is not None and bootstrap_stage.is_prepared:
+            validation_passed = bootstrap_stage.validate(_bootstrap_validator)
+            if validation_passed:
+                promoted = bootstrap_stage.promote()
+                metadata["bootstrap_promoted"] = True
+                metadata["bootstrap_promoted_files"] = promoted
+                logger.info(
+                    "Bootstrap atomic swap complete: %d file(s) promoted to live tree.",
+                    len(promoted),
+                )
+            else:
+                bootstrap_stage.discard()
+                metadata["bootstrap_promoted"] = False
+                metadata["bootstrap_rollback"] = True
+                logger.warning(
+                    "Bootstrap validation FAILED — staged changes discarded. "
+                    "Live workspace is unmodified (safe rollback)."
+                )
+            set_bootstrap_active(False)
 
     metadata["applied_assets"] = applied_assets
     metadata["manifest_path"] = str(_MANIFEST_PATH)

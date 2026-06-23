@@ -157,6 +157,7 @@ def build_command(args: argparse.Namespace) -> int:
             workspace_root=str(workspace),
             cycles=args.cycles,
             telemetry_interval=args.telemetry_interval,
+            bootstrap_active=getattr(args, "bootstrap_active", False),
         )
         ui.success()
         print(f"Manifest: {metadata.get('manifest_path')}")
@@ -1520,6 +1521,11 @@ def create_parser() -> argparse.ArgumentParser:
     build_parser.add_argument("--no-overlay", action="store_true", help="Skip re-applying committed user overlays to generated code")
     build_parser.add_argument("--runtime-feedback", action="store_true", help="Run the runtime benchmark after building")
     build_parser.add_argument("--validation-only", action="store_true", help="Skip the build; only run the validation suite")
+    build_parser.add_argument(
+        "--bootstrap-active",
+        action="store_true",
+        help="Signal that this invocation is a nested bootstrap pass (prevents infinite recursion)",
+    )
     build_parser.add_argument(
         "--no-scaffold-build",
         action="store_true",
