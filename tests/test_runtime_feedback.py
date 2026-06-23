@@ -7,6 +7,7 @@ import tempfile
 import unittest
 
 from src.runtime.feedback import RuntimeMetrics, RuntimeFeedback
+from src.utils.json_parsing import extract_json
 
 
 class TestRuntimeMetrics(unittest.TestCase):
@@ -186,15 +187,15 @@ class TestFitnessBlending(unittest.TestCase):
 
 class TestExtractJson(unittest.TestCase):
     def test_full_json(self):
-        result = RuntimeFeedback._extract_json('{"a": 1}')
+        result = extract_json('{"a": 1}')
         self.assertEqual(result, {"a": 1})
 
     def test_embedded_json(self):
-        result = RuntimeFeedback._extract_json('some prefix {"key": "val"} suffix')
+        result = extract_json('some prefix {"key": "val"} suffix')
         self.assertEqual(result, {"key": "val"})
 
     def test_invalid(self):
-        result = RuntimeFeedback._extract_json("not json at all")
+        result = extract_json("not json at all")
         self.assertIsNone(result)
 
 

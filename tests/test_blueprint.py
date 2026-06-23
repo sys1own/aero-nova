@@ -34,44 +34,28 @@ class TestReadmeExampleSchema(unittest.TestCase):
         cls.bp = LivingBlueprint.from_str(_readme_living_blueprint_schema())
 
     def test_system_section(self):
-        self.assertEqual(self.bp.system.name, "legacy-erp-modernisation")
-        self.assertEqual(self.bp.system.strategy, "microkernel")
+        self.assertEqual(self.bp.system.name, "production-scale-polyglot-pipeline")
+        self.assertEqual(self.bp.system.strategy, "universal-engine")
         self.assertTrue(self.bp.system.ephemeral_code)
 
     def test_context_registry(self):
-        self.assertEqual(set(self.bp.context_registry), {"legacy_cobol", "ai_fraud_lib"})
+        self.assertEqual(set(self.bp.context_registry), {"core_application"})
 
-        cobol = self.bp.context_registry["legacy_cobol"]
-        self.assertEqual(cobol.path, "./dumps/legacy/")
-        self.assertEqual(cobol.language, "cobol")
-        self.assertEqual(cobol.dialect, "ibm")
-        self.assertTrue(cobol.preserve_original_logic)
-
-        fraud = self.bp.context_registry["ai_fraud_lib"]
-        self.assertEqual(fraud.path, "../unrelated-python-lib/")
-        self.assertEqual(fraud.language, "python")
-        self.assertEqual(fraud.integration_mode, "sidecar")
-        # Unspecified fields fall back to their defaults.
-        self.assertEqual(fraud.dialect, "")
-        self.assertFalse(fraud.preserve_original_logic)
+        app = self.bp.context_registry["core_application"]
+        self.assertEqual(app.path, "./src/app_logic.py")
+        self.assertEqual(app.language, "python")
+        self.assertFalse(app.preserve_original_logic)
 
     def test_abstractions(self):
-        self.assertEqual(len(self.bp.abstractions), 1)
-        rule = self.bp.abstractions[0]
-        self.assertEqual(rule.legacy_pattern, "PERFORM VARYING ... UNTIL")
-        self.assertEqual(rule.target_pattern, "Rust Iterators + fold")
+        self.assertEqual(len(self.bp.abstractions), 0)
 
     def test_scaling(self):
-        self.assertEqual(self.bp.scaling.auto_split_threshold, 1500)
-        self.assertEqual(self.bp.scaling.max_module_complexity, 200)
+        self.assertEqual(self.bp.scaling.auto_split_threshold, 120)
+        self.assertEqual(self.bp.scaling.max_module_complexity, 12)
         self.assertEqual(self.bp.scaling.hierarchy_depth, 4)
 
     def test_context_bridges(self):
-        self.assertEqual(len(self.bp.context_bridges), 1)
-        bridge = self.bp.context_bridges[0]
-        self.assertEqual(bridge.source, "ai_fraud_lib")
-        self.assertEqual(bridge.target, "legacy_cobol")
-        self.assertEqual(bridge.bridge_type, "grpc_sidecar")
+        self.assertEqual(len(self.bp.context_bridges), 0)
 
 
 class TestShippedBlueprint(unittest.TestCase):

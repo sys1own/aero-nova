@@ -5,6 +5,7 @@ import json
 import unittest
 
 from src.validation.validator import ValidationCaseResult, ValidationReport, Validator
+from src.utils.json_parsing import extract_json
 
 
 class TestValidationCaseResult(unittest.TestCase):
@@ -165,15 +166,15 @@ class TestValidatorRun(unittest.TestCase):
 
 class TestExtractJson(unittest.TestCase):
     def test_valid_json(self):
-        result = Validator._extract_json('{"key": 1}')
+        result = extract_json('{"key": 1}')
         self.assertEqual(result, {"key": 1})
 
     def test_embedded_json(self):
-        result = Validator._extract_json('prefix {"a": "b"} suffix')
+        result = extract_json('prefix {"a": "b"} suffix')
         self.assertEqual(result, {"a": "b"})
 
     def test_invalid_json(self):
-        result = Validator._extract_json("not json")
+        result = extract_json("not json")
         self.assertIsNone(result)
 
 
