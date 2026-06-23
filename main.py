@@ -1452,22 +1452,27 @@ def scaffold_command(args: argparse.Namespace) -> int:
 
     repo = result.repo
     shield = result.shield
+    spec = repo.get('spec', {})
     print("\nStandalone repository generated:")
     print(f"  location         : {result.workspace}  (out-of-tree)")
-    print(f"  crate            : {repo['spec']['name']}  v{repo['spec']['version']}")
-    print(f"  dependencies     : {', '.join(repo['spec']['dependencies']) or '(none)'}")
-    print(f"  crate-type       : {repo['spec']['crate_type']}")
-    if repo['spec'].get('python_module'):
-        print(f"  python module    : {repo['spec']['python_module']}")
-    print(f"  files written    : {', '.join(repo['files'])}")
+    print(f"  project          : {spec.get('name', '-')}  v{spec.get('version', '0.0.0')}  ({result.language})")
+    print(f"  dependencies     : {', '.join(spec.get('dependencies') or []) or '(none)'}")
+    if spec.get('crate_type'):
+        print(f"  crate-type       : {spec['crate_type']}")
+    if spec.get('python_module'):
+        print(f"  python module    : {spec['python_module']}")
+    print(f"  files written    : {', '.join(repo.get('files') or [])}")
     if shield['anchors']:
         applied = ', '.join(shield['applied']) or '(already compatible)'
         print(f"  semantic shields : anchors={shield['anchors']} -> {applied}")
     if result.build is not None:
         build = result.build
-        status = "succeeded" if build["succeeded"] else "failed"
-        note = " (recovered after auto-correction)" if build.get("recovered") else ""
-        print(f"  build            : {status}{note} in {len(build['attempts'])} attempt(s)")
+        if build.get("bypassed"):
+            print(f"  build            : bypassed — {build.get('warning', 'non-rust target')}")
+        else:
+            status = "succeeded" if build["succeeded"] else "failed"
+            note = " (recovered after auto-correction)" if build.get("recovered") else ""
+            print(f"  build            : {status}{note} in {len(build['attempts'])} attempt(s)")
     if result.merge is not None:
         merge = result.merge
         if merge.get("merged"):
