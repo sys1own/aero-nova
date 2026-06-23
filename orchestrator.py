@@ -4,8 +4,10 @@ import importlib
 import json
 import logging
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -1029,4 +1031,399 @@ def configure_logging(verbose: bool = False) -> None:
         format="%(asctime)s %(levelname)-7s %(name)s - %(message)s",
         datefmt="%H:%M:%S",
     )
+
+
+class AeroShadowStagingManager:
+    """Sandboxed shadow staging for self-healing structural changes.
+
+    Self-healing routines must never write volatile or broken code layouts into
+    production source paths. This manager runs every repair inside an isolated
+    scratch workspace (``<workspace_root>/.aero/bootstrap_stage/``), verifies the
+    result via a polyglot syntax-compilation check, and only then performs an
+    atomic swap into the production tree. Failed transactions are purged and the
+    live source path is left untouched.
+
+    Transaction state machine (per the framework constraints), bounded by the
+    retry budget ``B = build_retry_budget``::
+
+        State(i) = Swap(f_c, f)        if V(f_c) == 1
+                 = Loop(i + 1)         if V(f_c) == 0 and i  < B
+                 = Purge(f_c) & Abort  if V(f_c) == 0 and i == B
+    """
+
+    #: Relative location of the scratch staging cache under the workspace root.
+    STAGE_SUBPATH = os.path.join(".aero", "bootstrap_stage")
+
+    def __init__(self, workspace_root: str, build_retry_budget: int = 3) -> None:
+        self.workspace_root = os.path.abspath(workspace_root)
+        # The retry budget B is bound to a maximum value of 3.
+        self.build_retry_budget = max(1, min(int(build_retry_budget), 3))
+        self.stage_root = os.path.join(self.workspace_root, self.STAGE_SUBPATH)
+        os.makedirs(self.stage_root, exist_ok=True)
+
+    # ------------------------------------------------------------------ #
+    # Transaction driver
+    # ------------------------------------------------------------------ #
+    def execute_healing_transaction(
+        self,
+        relative_file_path: str,
+        repair_function: Callable[[bytes], bytes],
+    ) -> bool:
+        """Stage, repair, verify and (on success) atomically promote a file.
+
+        ``repair_function`` receives the current file bytes and returns the
+        repaired bytes. The repair/verify cycle runs inside the retry budget;
+        each failed iteration re-feeds the most recent staged bytes. Returns
+        ``True`` only when a verified result was atomically swapped into the
+        production path; otherwise the stage is purged and production is
+        untouched.
+        """
+        prod_path = os.path.join(self.workspace_root, relative_file_path)
+        if not os.path.isfile(prod_path):
+            logger.warning("ShadowStaging: production file missing: %s", prod_path)
+            return False
+
+        stage_path = os.path.join(self.stage_root, relative_file_path)
+        os.makedirs(os.path.dirname(stage_path) or self.stage_root, exist_ok=True)
+
+        # Safely copy the active file into staging, preserving metadata.
+        shutil.copy2(prod_path, stage_path)
+
+        try:
+            for attempt in range(1, self.build_retry_budget + 1):
+                try:
+                    with open(stage_path, "rb") as handle:
+                        current_bytes = handle.read()
+                    repaired = repair_function(current_bytes)
+                    with open(stage_path, "wb") as handle:
+                        handle.write(repaired)
+                except Exception as exc:  # repair closures are untrusted
+                    logger.warning(
+                        "ShadowStaging: repair raised on attempt %d/%d: %s",
+                        attempt, self.build_retry_budget, exc,
+                    )
+                    continue
+
+                # V(f_c): syntax-compilation verification of the staged file.
+                if self._verify_compilation(stage_path):
+                    self._atomic_workspace_swap(stage_path, prod_path)
+                    logger.info(
+                        "ShadowStaging: transaction verified on attempt %d/%d; "
+                        "promoted %s",
+                        attempt, self.build_retry_budget, relative_file_path,
+                    )
+                    return True
+
+                logger.debug(
+                    "ShadowStaging: verification failed on attempt %d/%d for %s",
+                    attempt, self.build_retry_budget, relative_file_path,
+                )
+
+            # Budget exhausted (i == B with V == 0): purge and abort.
+            logger.warning(
+                "ShadowStaging: retry budget (%d) exhausted for %s — staged "
+                "changes discarded, production left unmodified.",
+                self.build_retry_budget, relative_file_path,
+            )
+            return False
+        finally:
+            self._purge_stage()
+
+    # ------------------------------------------------------------------ #
+    # Polyglot compilation verification — V(f_c)
+    # ------------------------------------------------------------------ #
+    def _verify_compilation(self, file_path: str) -> bool:
+        """Run a syntax-only compilation check keyed on the file extension."""
+        ext = os.path.splitext(file_path)[1].lower()
+        if ext == ".py":
+            command = ["python3", "-m", "py_compile", file_path]
+        elif ext == ".rs":
+            command = [
+                "rustc", "--crate-type=lib", "--emit=mir",
+                "-Z", "no-codegen", file_path,
+            ]
+        elif ext in (".cpp", ".cc", ".cxx", ".hpp", ".hh", ".h"):
+            command = ["clang++", "-fsyntax-only", "-std=c++17", file_path]
+        else:
+            # No verifier registered for this language: nothing to assert.
+            logger.debug("ShadowStaging: no compiler check for extension %r", ext)
+            return True
+
+        try:
+            result = subprocess.run(
+                command,
+                cwd=self.stage_root,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+        except FileNotFoundError:
+            logger.warning(
+                "ShadowStaging: toolchain %r unavailable; cannot verify %s",
+                command[0], file_path,
+            )
+            return False
+        except subprocess.TimeoutExpired:
+            logger.warning("ShadowStaging: verification timed out for %s", file_path)
+            return False
+
+        if result.returncode != 0:
+            logger.debug(
+                "ShadowStaging: verifier %r rejected %s: %s",
+                command[0], file_path, (result.stderr or "").strip()[:500],
+            )
+        return result.returncode == 0
+
+    # ------------------------------------------------------------------ #
+    # Atomic promotion + cleanup
+    # ------------------------------------------------------------------ #
+    def _atomic_workspace_swap(self, stage_path: str, prod_path: str) -> None:
+        """Atomically replace ``prod_path`` with the verified ``stage_path``.
+
+        The verified bytes are first written to a transient ``.tmp`` file inside
+        the production directory (same filesystem) and then moved into place via
+        :func:`os.replace`, which is atomic and thread-safe on a single volume.
+        """
+        prod_dir = os.path.dirname(prod_path) or self.workspace_root
+        os.makedirs(prod_dir, exist_ok=True)
+
+        with open(stage_path, "rb") as handle:
+            verified_bytes = handle.read()
+
+        fd, tmp_path = tempfile.mkstemp(
+            dir=prod_dir,
+            prefix=os.path.basename(prod_path) + ".",
+            suffix=".tmp",
+        )
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(verified_bytes)
+                handle.flush()
+                os.fsync(handle.fileno())
+            # Mirror source metadata onto the staged result before promotion.
+            shutil.copystat(stage_path, tmp_path)
+            os.replace(tmp_path, prod_path)
+        except Exception:
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+            raise
+
+    def _purge_stage(self) -> None:
+        """Remove the staging cache path on transaction termination."""
+        shutil.rmtree(self.stage_root, ignore_errors=True)
+        os.makedirs(self.stage_root, exist_ok=True)
+
+
+# --------------------------------------------------------------------------- #
+# Self-Healing v2 subsystem wiring
+# --------------------------------------------------------------------------- #
+# The four self-healing modules are imported defensively: a missing optional
+# dependency (e.g. tree-sitter) must never break the primary orchestrator import
+# path or the existing test suite. Unavailable pieces simply disable the matching
+# pipeline step at runtime.
+try:  # Two-Tiered Structural Merger
+    from builder_brains.compactor import TwoTieredStructuralMerger
+except ImportError:  # pragma: no cover - defensive
+    TwoTieredStructuralMerger = None  # type: ignore
+
+try:  # Tree-sitter Syntactic Recovery
+    from builder_brains.recovery_parser import AeroTreeRecoveryParser
+except ImportError:  # pragma: no cover - defensive
+    AeroTreeRecoveryParser = None  # type: ignore
+
+try:  # Dependency Reflux Engine
+    from builder_brains.reflux import AeroDependencyRefluxEngine
+except ImportError:  # pragma: no cover - defensive
+    AeroDependencyRefluxEngine = None  # type: ignore
+
+try:  # Stateful LSP Diagnostic Binder
+    from src.lsp_proxy import LspDiagnosticRefluxBinder
+except ImportError:  # pragma: no cover - defensive
+    try:
+        from lsp_proxy import LspDiagnosticRefluxBinder  # type: ignore
+    except ImportError:  # pragma: no cover - defensive
+        LspDiagnosticRefluxBinder = None  # type: ignore
+
+
+class AeroCoreExecutionOrchestrator:
+    """Unified Self-Healing v2 build pipeline.
+
+    Stitches the four self-healing subsystems into a single per-file execution
+    flow:
+
+      * **Syntactic Recovery** (:class:`AeroTreeRecoveryParser`) patches raw
+        Tree-sitter ``ERROR`` / ``MISSING`` nodes in memory.
+      * **Two-Tiered Structural Merging**
+        (:class:`~builder_brains.compactor.TwoTieredStructuralMerger`) folds the
+        machine patch back onto the developer's original layout/trivia.
+      * **Stateful LSP Binding**
+        (:class:`~src.lsp_proxy.LspDiagnosticRefluxBinder`) surfaces pending
+        semantic-repair actions captured from language servers.
+      * **Dependency Reflux**
+        (:class:`~builder_brains.reflux.AeroDependencyRefluxEngine`) applies
+        those actions (missing imports / use declarations).
+
+    Every healed file is validated and atomically promoted via
+    :class:`AeroShadowStagingManager`, so a failed heal never pollutes the
+    production source tree.
+
+    The engine degrades gracefully: any subsystem whose optional dependency is
+    unavailable is skipped, and the rest of the pipeline still runs.
+    """
+
+    def __init__(
+        self,
+        workspace_root: str,
+        language: Any = None,
+        parser: Any = None,
+        language_name: Optional[str] = None,
+        lsp_binder: Any = None,
+        build_retry_budget: int = 3,
+    ) -> None:
+        self.workspace_root = os.path.abspath(workspace_root)
+        self.language_name = language_name
+        self.staging = AeroShadowStagingManager(
+            self.workspace_root, build_retry_budget=build_retry_budget
+        )
+
+        # Step 1 dependency: Tree-sitter recovery (optional).
+        self.recovery_parser = None
+        if AeroTreeRecoveryParser is not None and language is not None and parser is not None:
+            self.recovery_parser = AeroTreeRecoveryParser(
+                language, parser, language_name=language_name
+            )
+
+        # Step 2 dependencies.
+        self.merger = TwoTieredStructuralMerger() if TwoTieredStructuralMerger else None
+        self.reflux_engine = (
+            AeroDependencyRefluxEngine() if AeroDependencyRefluxEngine else None
+        )
+        self.lsp_binder = lsp_binder
+        if self.lsp_binder is None and LspDiagnosticRefluxBinder is not None:
+            self.lsp_binder = LspDiagnosticRefluxBinder()
+
+    # ------------------------------------------------------------------ #
+    # End-to-end per-file pipeline
+    # ------------------------------------------------------------------ #
+    def process_target_file(self, relative_file_path: str) -> Dict[str, Any]:
+        """Run the three-step self-healing pipeline for a single target file.
+
+        Returns a report dict describing whether the file was healed, which
+        actions fired, and the terminal status of the transaction.
+        """
+        report: Dict[str, Any] = {
+            "file": relative_file_path,
+            "healed": False,
+            "recovery_mutated": False,
+            "reflux_actions": [],
+            "status": "noop",
+        }
+
+        prod_path = os.path.join(self.workspace_root, relative_file_path)
+        try:
+            with open(prod_path, "rb") as handle:
+                original_bytes = handle.read()
+        except OSError as exc:
+            logger.warning("CoreExec: cannot read %s: %s", prod_path, exc)
+            report["status"] = "missing_source"
+            return report
+
+        # ---- Step 1: Syntactic recovery ---------------------------------- #
+        recovered_bytes = original_bytes
+        if self.recovery_parser is not None:
+            tree, recovered_bytes, mutated = self.recovery_parser.attempt_recovery(
+                original_bytes
+            )
+            report["recovery_mutated"] = bool(mutated)
+            # If anomalies remain after the in-memory patch attempt, fall back.
+            if tree.root_node.has_error:
+                logger.warning(
+                    "CoreExec: PIPELINE FALLBACK — unrecoverable syntax anomalies "
+                    "remain in %s after in-memory recovery; skipping self-heal.",
+                    relative_file_path,
+                )
+                report["status"] = "fallback_unrecoverable"
+                return report
+
+        # ---- Step 2: compile-time healing transaction wrapper ------------ #
+        original_source = original_bytes.decode("utf-8", errors="replace")
+        pending_actions = self._pending_actions_for(prod_path)
+        report["reflux_actions"] = [a.get("action") for a in pending_actions]
+
+        def compile_time_healing_transaction(source_bytes: bytes) -> bytes:
+            """Combine layout trivia, syntax patches and LSP-driven reflux."""
+            # Decode the staged source and the recovered (machine) stream.
+            synthesized = recovered_bytes.decode("utf-8", errors="replace")
+
+            # Two-tiered merge: re-apply the developer's layout/trivia onto the
+            # machine-synthesized patch.
+            if self.merger is not None:
+                merged = self.merger.merge_clean_reconstruction(
+                    original_source, synthesized
+                )
+            else:
+                merged = synthesized
+            merged_bytes = merged.encode("utf-8")
+
+            # Route pending LSP diagnostics to the reflux engine to inject any
+            # missing imports / use declarations.
+            if self.reflux_engine is not None and pending_actions:
+                merged_bytes = self._apply_reflux(
+                    prod_path, merged_bytes, pending_actions
+                )
+            return merged_bytes
+
+        # ---- Step 3: sandboxed staging containment loop ------------------ #
+        promoted = self.staging.execute_healing_transaction(
+            relative_file_path, compile_time_healing_transaction
+        )
+        report["healed"] = bool(promoted)
+        report["status"] = "promoted" if promoted else "rolled_back"
+
+        if promoted:
+            self._log_healing_summary(report)
+        return report
+
+    # ------------------------------------------------------------------ #
+    # Helpers
+    # ------------------------------------------------------------------ #
+    def _pending_actions_for(self, prod_path: str) -> List[Dict[str, Any]]:
+        """Fetch pending LSP reflux commands keyed to this file, if any."""
+        if self.lsp_binder is None:
+            return []
+        pending = getattr(self.lsp_binder, "pending_reflux_commands", {}) or {}
+        # The binder keys by resolved path; tolerate either absolute or relative.
+        for key in (prod_path, os.path.abspath(prod_path)):
+            if key in pending:
+                return list(pending[key])
+        return []
+
+    def _apply_reflux(
+        self, prod_path: str, source_bytes: bytes, actions: List[Dict[str, Any]]
+    ) -> bytes:
+        """Apply reflux actions to in-memory bytes via a transient scratch file.
+
+        ``AeroDependencyRefluxEngine`` reads from a path; we stage the merged
+        bytes into a temp file (matching the production suffix so language
+        detection holds) so the engine can operate without touching production.
+        """
+        suffix = os.path.splitext(prod_path)[1]
+        fd, tmp_path = tempfile.mkstemp(dir=self.staging.stage_root, suffix=suffix)
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(source_bytes)
+            patched = self.reflux_engine.apply_reflux_patches(tmp_path, actions)
+            return patched if patched else source_bytes
+        finally:
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+
+    def _log_healing_summary(self, report: Dict[str, Any]) -> None:
+        """Emit a clean summary of the self-healing actions taken."""
+        actions = ", ".join(a for a in report["reflux_actions"] if a) or "none"
+        logger.info(
+            "Self-Healing v2 SUCCESS — %s | syntactic_recovery=%s | "
+            "reflux_actions=[%s] | promoted atomically.",
+            report["file"], report["recovery_mutated"], actions,
+        )
 
