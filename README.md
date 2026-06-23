@@ -1,4 +1,3 @@
-```markdown
 # AeroNova
 
 **AeroNova** is an ultra‑scale, high‑performance polyglot build orchestration and automated code‑splitting engine. It parses, validates, and optimizes intricate, tightly coupled micro‑services and monolithic codebases, handling the heavy lifting of codebase restructuring, dependency reflux mapping, and resilience‑driven optimisation passes.
