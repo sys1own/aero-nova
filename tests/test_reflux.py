@@ -80,6 +80,24 @@ class TestTypeHintFallbackInjection(unittest.TestCase):
                 "from typing import Optional, Union, Any, List, Dict, Callable, Iterator", text
             )
 
+    def test_fallback_is_idempotent(self):
+        with tempfile.TemporaryDirectory() as td:
+            pkg = Path(td) / "pkg"
+            pkg.mkdir()
+            (pkg / "leaf.py").write_text(
+                "from __future__ import annotations\n\n"
+                "from typing import Optional, Union, Any, List, Dict, Callable, Iterator\n"
+                "from pathlib import Path\n\n"
+                "def helper(p: Path) -> Optional[int]:\n    return None\n",
+                encoding="utf-8",
+            )
+            reflux.run_reflux(pkg)
+            text = (pkg / "leaf.py").read_text()
+            self.assertEqual(
+                text.count("from typing import Optional, Union, Any, List, Dict, Callable, Iterator"), 1
+            )
+            self.assertEqual(text.count("from pathlib import Path"), 1)
+
 
 class TestFutureImportHoistingInUtils(unittest.TestCase):
     """Compiler-flag __future__ imports are never duplicated into utils.py."""
