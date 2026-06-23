@@ -760,6 +760,15 @@ class TestFutureHoistingSplitter(_Tmp):
                 f"{path.name} must begin with the future import, got:\n{text[:120]}",
             )
 
+    def test_init_orchestrator_starts_with_future(self):
+        out = self.tmp / "split"
+        self._split()
+        init_text = (out / "__init__.py").read_text()
+        self.assertTrue(
+            init_text.startswith("from __future__ import annotations"),
+            f"__init__.py must begin with the future import, got:\n{init_text[:120]}",
+        )
+
     def test_split_modules_compile(self):
         for path in self._split():
             compile(path.read_text(), path.name, "exec")
@@ -774,10 +783,14 @@ class TestFutureHoistingSplitter(_Tmp):
         from src.decomposition.splitter import decompose_source
 
         for path in self._split():
-            sub_out = self.tmp / f"resplit_{path.stem}"
+            if Path(path).name == "__init__.py":
+                continue
+            sub_out = self.tmp / f"resplit_{Path(path).stem}"
             sub_result = decompose_source(path, sub_out, min_lines=1)
             self.assertEqual(sub_result.errors, [])
             for sub_path in (Path(p) for p in sub_result.files_written):
+                if sub_path.name == "__init__.py":
+                    continue
                 text = sub_path.read_text()
                 self.assertEqual(text.count("from __future__ import annotations"), 1)
                 self.assertTrue(
@@ -811,6 +824,8 @@ class TestTypeHintFallbackSplitter(_Tmp):
             "    return None\n"
         )
         for path in self._split(source):
+            if path.name == "__init__.py":
+                continue
             text = path.read_text()
             self.assertIn("from typing import Optional, Union, Any, List, Dict, Callable, Iterator", text)
             self.assertIn("from pathlib import Path", text)

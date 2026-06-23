@@ -27,6 +27,7 @@ class SplitResult:
     files_written: List[str] = field(default_factory=list)
     bytes_written: int = 0
     errors: List[str] = field(default_factory=list)
+    future_imports: str = ""
 
 
 @dataclass
@@ -213,6 +214,7 @@ def _generate_init(
     output_dir: Path,
     units: Optional[List[_ExtractedUnit]] = None,
     original_stem: str = "",
+    future_imports: str = "",
 ) -> tuple:
     """Generate __init__.py that re-exports all split modules.
 
@@ -221,9 +223,16 @@ def _generate_init(
     """
     init_path = output_dir / "__init__.py"
 
+    # Strict __future__ hoisting: compiler flags must occupy the absolute
+    # first line of the orchestrator stub, preceding any docstring or imports.
+    future = future_imports.strip()
+
     if units is None:
         # Scan: discover all decomposed module files in the directory.
-        lines = ['"""Auto-generated module index for decomposed package."""\n']
+        lines: List[str] = []
+        if future:
+            lines.append(future + "\n")
+        lines.append('"""Auto-generated module index for decomposed package."""\n')
         for py_file in sorted(output_dir.glob("*.py")):
             if py_file.name == "__init__.py" or py_file.name.startswith("_"):
                 continue
@@ -239,9 +248,12 @@ def _generate_init(
                 elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     lines.append(f"from .{module_name} import {node.name}")
     else:
-        lines = [
+        lines = []
+        if future:
+            lines.append(future + "\n")
+        lines.append(
             f'"""Auto-generated module index for decomposed {original_stem}."""\n',
-        ]
+        )
         for unit in units:
             module_name = f"{original_stem}_{unit.name.lower()}"
             lines.append(f"from .{module_name} import {unit.name}")
@@ -286,6 +298,12 @@ def decompose_source(
         result.errors.append(f"Cannot read {source_path}: {exc}")
         return result
 
+    try:
+        tree = ast.parse(source)
+    except SyntaxError as exc:
+        result.errors.append(f"Cannot parse {source_path}: {exc}")
+        return result
+
     units = _extract_units(source, min_lines=min_lines)
     if not units:
         result.errors.append(f"No extractable units in {source_path}")
@@ -294,6 +312,9 @@ def decompose_source(
     original_stem = source_path.stem
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    future_block = _extract_future_imports(tree, source)
+    result.future_imports = future_block
+
     for unit in units:
         try:
             path, nbytes = _write_module(output_dir, unit, original_stem)
@@ -301,6 +322,18 @@ def decompose_source(
             result.bytes_written += nbytes
         except OSError as exc:
             result.errors.append(f"Write failed for {unit.name}: {exc}")
+
+    try:
+        init_path, init_bytes = _generate_init(
+            output_dir,
+            units=units,
+            original_stem=original_stem,
+            future_imports=future_block,
+        )
+        result.files_written.append(init_path)
+        result.bytes_written += init_bytes
+    except OSError as exc:
+        result.errors.append(f"__init__.py generation failed: {exc}")
 
     return result
 
@@ -322,6 +355,7 @@ def run_decomposition(
     total_files: List[str] = []
     total_bytes = 0
     errors: List[str] = []
+    future_imports: set = set()
 
     sources_to_decompose: List[Path] = []
 
@@ -362,6 +396,8 @@ def run_decomposition(
         total_files.extend(result.files_written)
         total_bytes += result.bytes_written
         errors.extend(result.errors)
+        if result.future_imports:
+            future_imports.add(result.future_imports)
 
         # Run the self-healing reflux pipeline on the decomposed package:
         # Pass 1 consolidates duplicate utilities into utils.py,
@@ -376,9 +412,14 @@ def run_decomposition(
 
     # Generate a unified __init__.py that includes every split class AND
     # function from all decomposed source files in the package directory.
+    # Hoist the union of all source __future__ imports to the absolute first
+    # lines of the orchestrator stub so compiler flags remain at the top.
     if total_files:
         try:
-            init_path, init_bytes = _generate_init(pkg_dir)
+            init_path, init_bytes = _generate_init(
+                pkg_dir,
+                future_imports="\n".join(sorted(future_imports)),
+            )
             total_files.append(init_path)
             total_bytes += init_bytes
         except OSError as exc:
