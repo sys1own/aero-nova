@@ -1213,3 +1213,217 @@ class AeroShadowStagingManager:
         shutil.rmtree(self.stage_root, ignore_errors=True)
         os.makedirs(self.stage_root, exist_ok=True)
 
+
+# --------------------------------------------------------------------------- #
+# Self-Healing v2 subsystem wiring
+# --------------------------------------------------------------------------- #
+# The four self-healing modules are imported defensively: a missing optional
+# dependency (e.g. tree-sitter) must never break the primary orchestrator import
+# path or the existing test suite. Unavailable pieces simply disable the matching
+# pipeline step at runtime.
+try:  # Two-Tiered Structural Merger
+    from builder_brains.compactor import TwoTieredStructuralMerger
+except ImportError:  # pragma: no cover - defensive
+    TwoTieredStructuralMerger = None  # type: ignore
+
+try:  # Tree-sitter Syntactic Recovery
+    from builder_brains.recovery_parser import AeroTreeRecoveryParser
+except ImportError:  # pragma: no cover - defensive
+    AeroTreeRecoveryParser = None  # type: ignore
+
+try:  # Dependency Reflux Engine
+    from builder_brains.reflux import AeroDependencyRefluxEngine
+except ImportError:  # pragma: no cover - defensive
+    AeroDependencyRefluxEngine = None  # type: ignore
+
+try:  # Stateful LSP Diagnostic Binder
+    from src.lsp_proxy import LspDiagnosticRefluxBinder
+except ImportError:  # pragma: no cover - defensive
+    try:
+        from lsp_proxy import LspDiagnosticRefluxBinder  # type: ignore
+    except ImportError:  # pragma: no cover - defensive
+        LspDiagnosticRefluxBinder = None  # type: ignore
+
+
+class AeroCoreExecutionOrchestrator:
+    """Unified Self-Healing v2 build pipeline.
+
+    Stitches the four self-healing subsystems into a single per-file execution
+    flow:
+
+      * **Syntactic Recovery** (:class:`AeroTreeRecoveryParser`) patches raw
+        Tree-sitter ``ERROR`` / ``MISSING`` nodes in memory.
+      * **Two-Tiered Structural Merging**
+        (:class:`~builder_brains.compactor.TwoTieredStructuralMerger`) folds the
+        machine patch back onto the developer's original layout/trivia.
+      * **Stateful LSP Binding**
+        (:class:`~src.lsp_proxy.LspDiagnosticRefluxBinder`) surfaces pending
+        semantic-repair actions captured from language servers.
+      * **Dependency Reflux**
+        (:class:`~builder_brains.reflux.AeroDependencyRefluxEngine`) applies
+        those actions (missing imports / use declarations).
+
+    Every healed file is validated and atomically promoted via
+    :class:`AeroShadowStagingManager`, so a failed heal never pollutes the
+    production source tree.
+
+    The engine degrades gracefully: any subsystem whose optional dependency is
+    unavailable is skipped, and the rest of the pipeline still runs.
+    """
+
+    def __init__(
+        self,
+        workspace_root: str,
+        language: Any = None,
+        parser: Any = None,
+        language_name: Optional[str] = None,
+        lsp_binder: Any = None,
+        build_retry_budget: int = 3,
+    ) -> None:
+        self.workspace_root = os.path.abspath(workspace_root)
+        self.language_name = language_name
+        self.staging = AeroShadowStagingManager(
+            self.workspace_root, build_retry_budget=build_retry_budget
+        )
+
+        # Step 1 dependency: Tree-sitter recovery (optional).
+        self.recovery_parser = None
+        if AeroTreeRecoveryParser is not None and language is not None and parser is not None:
+            self.recovery_parser = AeroTreeRecoveryParser(
+                language, parser, language_name=language_name
+            )
+
+        # Step 2 dependencies.
+        self.merger = TwoTieredStructuralMerger() if TwoTieredStructuralMerger else None
+        self.reflux_engine = (
+            AeroDependencyRefluxEngine() if AeroDependencyRefluxEngine else None
+        )
+        self.lsp_binder = lsp_binder
+        if self.lsp_binder is None and LspDiagnosticRefluxBinder is not None:
+            self.lsp_binder = LspDiagnosticRefluxBinder()
+
+    # ------------------------------------------------------------------ #
+    # End-to-end per-file pipeline
+    # ------------------------------------------------------------------ #
+    def process_target_file(self, relative_file_path: str) -> Dict[str, Any]:
+        """Run the three-step self-healing pipeline for a single target file.
+
+        Returns a report dict describing whether the file was healed, which
+        actions fired, and the terminal status of the transaction.
+        """
+        report: Dict[str, Any] = {
+            "file": relative_file_path,
+            "healed": False,
+            "recovery_mutated": False,
+            "reflux_actions": [],
+            "status": "noop",
+        }
+
+        prod_path = os.path.join(self.workspace_root, relative_file_path)
+        try:
+            with open(prod_path, "rb") as handle:
+                original_bytes = handle.read()
+        except OSError as exc:
+            logger.warning("CoreExec: cannot read %s: %s", prod_path, exc)
+            report["status"] = "missing_source"
+            return report
+
+        # ---- Step 1: Syntactic recovery ---------------------------------- #
+        recovered_bytes = original_bytes
+        if self.recovery_parser is not None:
+            tree, recovered_bytes, mutated = self.recovery_parser.attempt_recovery(
+                original_bytes
+            )
+            report["recovery_mutated"] = bool(mutated)
+            # If anomalies remain after the in-memory patch attempt, fall back.
+            if tree.root_node.has_error:
+                logger.warning(
+                    "CoreExec: PIPELINE FALLBACK — unrecoverable syntax anomalies "
+                    "remain in %s after in-memory recovery; skipping self-heal.",
+                    relative_file_path,
+                )
+                report["status"] = "fallback_unrecoverable"
+                return report
+
+        # ---- Step 2: compile-time healing transaction wrapper ------------ #
+        original_source = original_bytes.decode("utf-8", errors="replace")
+        pending_actions = self._pending_actions_for(prod_path)
+        report["reflux_actions"] = [a.get("action") for a in pending_actions]
+
+        def compile_time_healing_transaction(source_bytes: bytes) -> bytes:
+            """Combine layout trivia, syntax patches and LSP-driven reflux."""
+            # Decode the staged source and the recovered (machine) stream.
+            synthesized = recovered_bytes.decode("utf-8", errors="replace")
+
+            # Two-tiered merge: re-apply the developer's layout/trivia onto the
+            # machine-synthesized patch.
+            if self.merger is not None:
+                merged = self.merger.merge_clean_reconstruction(
+                    original_source, synthesized
+                )
+            else:
+                merged = synthesized
+            merged_bytes = merged.encode("utf-8")
+
+            # Route pending LSP diagnostics to the reflux engine to inject any
+            # missing imports / use declarations.
+            if self.reflux_engine is not None and pending_actions:
+                merged_bytes = self._apply_reflux(
+                    prod_path, merged_bytes, pending_actions
+                )
+            return merged_bytes
+
+        # ---- Step 3: sandboxed staging containment loop ------------------ #
+        promoted = self.staging.execute_healing_transaction(
+            relative_file_path, compile_time_healing_transaction
+        )
+        report["healed"] = bool(promoted)
+        report["status"] = "promoted" if promoted else "rolled_back"
+
+        if promoted:
+            self._log_healing_summary(report)
+        return report
+
+    # ------------------------------------------------------------------ #
+    # Helpers
+    # ------------------------------------------------------------------ #
+    def _pending_actions_for(self, prod_path: str) -> List[Dict[str, Any]]:
+        """Fetch pending LSP reflux commands keyed to this file, if any."""
+        if self.lsp_binder is None:
+            return []
+        pending = getattr(self.lsp_binder, "pending_reflux_commands", {}) or {}
+        # The binder keys by resolved path; tolerate either absolute or relative.
+        for key in (prod_path, os.path.abspath(prod_path)):
+            if key in pending:
+                return list(pending[key])
+        return []
+
+    def _apply_reflux(
+        self, prod_path: str, source_bytes: bytes, actions: List[Dict[str, Any]]
+    ) -> bytes:
+        """Apply reflux actions to in-memory bytes via a transient scratch file.
+
+        ``AeroDependencyRefluxEngine`` reads from a path; we stage the merged
+        bytes into a temp file (matching the production suffix so language
+        detection holds) so the engine can operate without touching production.
+        """
+        suffix = os.path.splitext(prod_path)[1]
+        fd, tmp_path = tempfile.mkstemp(dir=self.staging.stage_root, suffix=suffix)
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(source_bytes)
+            patched = self.reflux_engine.apply_reflux_patches(tmp_path, actions)
+            return patched if patched else source_bytes
+        finally:
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+
+    def _log_healing_summary(self, report: Dict[str, Any]) -> None:
+        """Emit a clean summary of the self-healing actions taken."""
+        actions = ", ".join(a for a in report["reflux_actions"] if a) or "none"
+        logger.info(
+            "Self-Healing v2 SUCCESS — %s | syntactic_recovery=%s | "
+            "reflux_actions=[%s] | promoted atomically.",
+            report["file"], report["recovery_mutated"], actions,
+        )
+
