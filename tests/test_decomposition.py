@@ -770,6 +770,20 @@ class TestFutureHoistingSplitter(_Tmp):
             # Exactly one future statement — hoisted, never also trapped below.
             self.assertEqual(text.count("from __future__ import annotations"), 1)
 
+    def test_future_hoisting_idempotent_under_recursive_sweep(self):
+        from src.decomposition.splitter import decompose_source
+
+        for path in self._split():
+            sub_out = self.tmp / f"resplit_{path.stem}"
+            sub_result = decompose_source(path, sub_out, min_lines=1)
+            self.assertEqual(sub_result.errors, [])
+            for sub_path in (Path(p) for p in sub_result.files_written):
+                text = sub_path.read_text()
+                self.assertEqual(text.count("from __future__ import annotations"), 1)
+                self.assertTrue(
+                    text.startswith("from __future__ import annotations"),
+                    f"{sub_path.name} must begin with the future import, got:\n{text[:120]}",
+                )
 
 
 # ---------------------------------------------------------------------------
