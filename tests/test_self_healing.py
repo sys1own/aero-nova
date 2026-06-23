@@ -13,6 +13,7 @@ from core.toolchain.self_healing import (
     SymbolIndex,
     _apply_edits,
     _crate_name_from_message,
+    _parse_cargo_dependencies,
     _plan_edits,
     categorize,
     flag_healing_failure,
@@ -274,6 +275,36 @@ class TestHealMissingCrate(unittest.TestCase):
             heal_missing_crate(b"", d, "rust", cargo_toml_path=cargo)
             self.assertEqual(cargo.read_text().count("serde"), 1)
 
+    def test_preserves_existing_features_and_version(self):
+        with tempfile.TemporaryDirectory() as ws:
+            cargo = Path(ws) / "Cargo.toml"
+            original = (
+                '[package]\nname = "pyo3-demo"\n\n[dependencies]\n'
+                'pyo3 = { version = "0.20", features = ["extension-module"] }\n'
+            )
+            cargo.write_text(original)
+            d = Diagnostic(
+                "cannot find crate `pyo3`", str(Path(ws) / "lib.rs"), code="E0433",
+            )
+            heal_missing_crate(b"", d, "rust", cargo_toml_path=cargo)
+            self.assertEqual(cargo.read_text(), original)
+
+    def test_preserves_multiline_table_dependency(self):
+        with tempfile.TemporaryDirectory() as ws:
+            cargo = Path(ws) / "Cargo.toml"
+            original = (
+                '[package]\nname = "t"\n\n[dependencies]\n'
+                'tokio = { version = "1",\n'
+                '  features = ["full"] }\n'
+            )
+            cargo.write_text(original)
+            d = Diagnostic(
+                "use of undeclared crate or module `tokio`",
+                str(Path(ws) / "main.rs"), code="E0433",
+            )
+            heal_missing_crate(b"", d, "rust", cargo_toml_path=cargo)
+            self.assertEqual(cargo.read_text(), original)
+
 
 class TestHealMismatchedSlice(unittest.TestCase):
     def test_flatten_appended(self):
@@ -343,6 +374,60 @@ class TestRealRustc(unittest.TestCase):
         f.write_text("fn main(){ let x = 1 let _ = x; }\n")
         report = heal_module(f, make_rust_build_fn(), workspace=self.ws)
         self.assertTrue(report.success)
+
+
+class TestParseCargoDepedencies(unittest.TestCase):
+    def test_inline_dependency(self):
+        text = '[dependencies]\nserde = "1"\n'
+        deps = _parse_cargo_dependencies(text)
+        self.assertIn("serde", deps)
+
+    def test_table_dependency(self):
+        text = '[dependencies]\npyo3 = { version = "0.20", features = ["extension-module"] }\n'
+        deps = _parse_cargo_dependencies(text)
+        self.assertIn("pyo3", deps)
+
+    def test_multiline_table(self):
+        text = '[dependencies]\ntokio = { version = "1",\n  features = ["full"] }\n'
+        deps = _parse_cargo_dependencies(text)
+        self.assertIn("tokio", deps)
+
+    def test_stops_at_next_section(self):
+        text = '[dependencies]\nserde = "1"\n\n[dev-dependencies]\ntest = "1"\n'
+        deps = _parse_cargo_dependencies(text)
+        self.assertIn("serde", deps)
+        self.assertNotIn("test", deps)
+
+
+class TestManifestRollback(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.ws = self.tmp.name
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_cargo_toml_restored_on_rollback(self):
+        cargo = Path(self.ws) / "Cargo.toml"
+        original_cargo = (
+            '[package]\nname = "demo"\n\n'
+            '[dependencies]\npyo3 = { version = "0.20", features = ["extension-module"] }\n'
+        )
+        cargo.write_text(original_cargo)
+        f = Path(self.ws, "lib.rs")
+        f.write_text("use unknown_crate::Thing;\n")
+
+        def build(path):
+            return [Diagnostic(
+                "use of undeclared crate or module `unknown_crate`",
+                str(path), code="E0433",
+            )]
+
+        report = heal_module(f, build, workspace=self.ws)
+        self.assertFalse(report.success)
+        self.assertTrue(report.rolled_back)
+        # Cargo.toml must be restored to its original state (features intact).
+        self.assertEqual(cargo.read_text(), original_cargo)
 
 
 if __name__ == "__main__":

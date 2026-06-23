@@ -23,12 +23,13 @@ a partial/corrupt edit is never left behind.
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence, Union
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 
 from core.parser.universal import _load_language, detect_language, extract_symbols, parse_source
 
@@ -346,6 +347,37 @@ def _crate_name_from_message(message: str) -> Optional[str]:
     return _symbol_from_message(message)
 
 
+def _parse_cargo_dependencies(cargo_text: str) -> Dict[str, Tuple[int, int]]:
+    """Return a mapping of crate name → (line_start, line_end) within [dependencies].
+
+    Handles both inline (``crate = "version"``) and table-style
+    (``crate = { version = "...", features = [...] }``) entries.
+    """
+    deps: Dict[str, Tuple[int, int]] = {}
+    in_deps = False
+    lines = cargo_text.splitlines(keepends=True)
+    i = 0
+    while i < len(lines):
+        stripped = lines[i].strip()
+        if stripped.startswith("["):
+            in_deps = stripped == "[dependencies]"
+            i += 1
+            continue
+        if in_deps:
+            m = re.match(r'^(\w[\w-]*)\s*=', lines[i])
+            if m:
+                name = m.group(1)
+                start = i
+                # Multi-line table values: if the value opens with '{' but
+                # doesn't close on the same line, consume continuation lines.
+                if '{' in lines[i] and '}' not in lines[i]:
+                    while i < len(lines) - 1 and '}' not in lines[i]:
+                        i += 1
+                deps[name] = (start, i)
+        i += 1
+    return deps
+
+
 def heal_missing_crate(
     source: bytes, diag: Diagnostic, language: str,
     *, cargo_toml_path: Optional[Path] = None,
@@ -357,8 +389,9 @@ def heal_missing_crate(
     The edit targets the Cargo.toml bytes, not the Rust source itself; the caller
     must apply the returned edits to the **manifest file**, not the source file.
 
-    Returns source-level edits only when the missing symbol looks like a module
-    import (``use <crate>::...``) and a simple ``extern crate`` line is warranted.
+    Smart merging: if the crate already exists in [dependencies] (with version
+    pins, feature flags, etc.), the existing entry is preserved as-is.  Only
+    truly absent crates are appended.
     """
     if language != "rust":
         return []
@@ -378,19 +411,23 @@ def heal_missing_crate(
 
     if manifest is not None and manifest.is_file():
         cargo_text = manifest.read_text(encoding="utf-8")
+        existing_deps = _parse_cargo_dependencies(cargo_text)
+
+        # If the crate is already declared, preserve its version/features.
+        if crate_name in existing_deps:
+            return []
+
         dep_line = f'{crate_name} = "*"'
-        if crate_name not in cargo_text:
-            if "[dependencies]" in cargo_text:
-                idx = cargo_text.index("[dependencies]") + len("[dependencies]")
-                # Skip to end of the line.
-                nl = cargo_text.find("\n", idx)
-                if nl == -1:
-                    nl = len(cargo_text)
-                insert_pos = nl + 1
-                new_cargo = cargo_text[:insert_pos] + dep_line + "\n" + cargo_text[insert_pos:]
-            else:
-                new_cargo = cargo_text.rstrip("\n") + "\n\n[dependencies]\n" + dep_line + "\n"
-            manifest.write_text(new_cargo, encoding="utf-8")
+        if "[dependencies]" in cargo_text:
+            idx = cargo_text.index("[dependencies]") + len("[dependencies]")
+            nl = cargo_text.find("\n", idx)
+            if nl == -1:
+                nl = len(cargo_text)
+            insert_pos = nl + 1
+            new_cargo = cargo_text[:insert_pos] + dep_line + "\n" + cargo_text[insert_pos:]
+        else:
+            new_cargo = cargo_text.rstrip("\n") + "\n\n[dependencies]\n" + dep_line + "\n"
+        manifest.write_text(new_cargo, encoding="utf-8")
 
     return []
 
@@ -631,6 +668,17 @@ def heal_module(
         symbol_index = SymbolIndex.build(ws)
 
     original = file_path.read_bytes()
+
+    # Snapshot manifests that side-effect healers may modify (e.g. Cargo.toml)
+    # so we can restore them cleanly on rollback without losing user config.
+    manifest_snapshots: Dict[Path, bytes] = {}
+    for manifest_name in ("Cargo.toml",):
+        for search_dir in (file_path.parent, *file_path.parents):
+            candidate = search_dir / manifest_name
+            if candidate.is_file():
+                manifest_snapshots[candidate] = candidate.read_bytes()
+                break
+
     report = HealReport(path=file_path.as_posix(), success=False, attempts=0)
 
     for attempt in range(1, max_attempts + 1):
@@ -660,7 +708,11 @@ def heal_module(
                 report.applied.append(category.value)
 
     # Exhausted / stuck -> rollback to the original clean state and flag.
+    # Restore both source and any manifests modified by side-effect healers.
     file_path.write_bytes(original)
+    for mpath, mdata in manifest_snapshots.items():
+        if mpath.is_file():
+            mpath.write_bytes(mdata)
     report.rolled_back = True
     if report.reason is None:
         report.reason = f"unresolved after {report.attempts} build attempt(s)"
@@ -747,7 +799,8 @@ def make_rust_build_fn(timeout: float = 60.0) -> BuildFn:
             out = Path(tmp) / "out"
             proc = subprocess.run(
                 ["rustc", "--error-format=json", "--edition", "2021", str(path), "-o", str(out)],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=timeout,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                timeout=timeout, env=os.environ.copy(),
             )
             return parse_rustc_json(proc.stderr)
 
@@ -759,7 +812,8 @@ def make_c_build_fn(compiler: str = "cc", timeout: float = 60.0) -> BuildFn:
     def build(path: Path) -> List[Diagnostic]:
         proc = subprocess.run(
             [compiler, "-fsyntax-only", "-fdiagnostics-format=json", str(path)],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=timeout,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            timeout=timeout, env=os.environ.copy(),
         )
         return parse_gcc_json(proc.stderr)
 
