@@ -66,7 +66,12 @@ def _extract_import_block(source: str) -> str:
 
 
 def _extract_units(source: str, min_lines: int = 5) -> List[_ExtractedUnit]:
-    """Parse source and extract top-level classes and large functions."""
+    """Parse source and extract top-level classes and ALL top-level functions.
+
+    Classes are subject to the ``min_lines`` threshold.  Functions are extracted
+    unconditionally (lossless slicing) so that every standalone ``def`` block is
+    written as its own leaf module regardless of size.
+    """
     try:
         tree = ast.parse(source)
     except SyntaxError:
@@ -92,13 +97,14 @@ def _extract_units(source: str, min_lines: int = 5) -> List[_ExtractedUnit]:
             start = node.lineno - 1
             end = node.end_lineno if node.end_lineno else start + 1
             body = "".join(lines[start:end])
-            if (end - start) >= min_lines:
-                units.append(_ExtractedUnit(
-                    name=node.name,
-                    kind="function",
-                    source=body,
-                    imports=import_block,
-                ))
+            # Lossless: every top-level function is extracted regardless of
+            # size when decomposition thresholds are crossed.
+            units.append(_ExtractedUnit(
+                name=node.name,
+                kind="function",
+                source=body,
+                imports=import_block,
+            ))
 
     return units
 
@@ -119,19 +125,42 @@ def _write_module(
 
 
 def _generate_init(
-    output_dir: Path, units: List[_ExtractedUnit], original_stem: str
+    output_dir: Path,
+    units: Optional[List[_ExtractedUnit]] = None,
+    original_stem: str = "",
 ) -> tuple:
-    """Generate __init__.py that re-exports all split modules."""
+    """Generate __init__.py that re-exports all split modules.
+
+    When called without *units*, scans the output_dir for all decomposed
+    module files and generates a comprehensive forwarding index.
+    """
     init_path = output_dir / "__init__.py"
-    lines = [
-        f'"""Auto-generated module index for decomposed {original_stem}."""\n',
-    ]
-    for unit in units:
-        module_name = f"{original_stem}_{unit.name.lower()}"
-        if unit.kind == "class":
+
+    if units is None:
+        # Scan: discover all decomposed module files in the directory.
+        lines = ['"""Auto-generated module index for decomposed package."""\n']
+        for py_file in sorted(output_dir.glob("*.py")):
+            if py_file.name == "__init__.py" or py_file.name.startswith("_"):
+                continue
+            module_name = py_file.stem
+            # Parse the file to discover exported symbols.
+            try:
+                tree = ast.parse(py_file.read_text(encoding="utf-8"))
+            except SyntaxError:
+                continue
+            for node in ast.iter_child_nodes(tree):
+                if isinstance(node, ast.ClassDef):
+                    lines.append(f"from .{module_name} import {node.name}")
+                elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    lines.append(f"from .{module_name} import {node.name}")
+    else:
+        lines = [
+            f'"""Auto-generated module index for decomposed {original_stem}."""\n',
+        ]
+        for unit in units:
+            module_name = f"{original_stem}_{unit.name.lower()}"
             lines.append(f"from .{module_name} import {unit.name}")
-        else:
-            lines.append(f"from .{module_name} import {unit.name}")
+
     lines.append("")  # trailing newline
     content = "\n".join(lines)
     init_path.write_text(content, encoding="utf-8")
@@ -188,14 +217,6 @@ def decompose_source(
         except OSError as exc:
             result.errors.append(f"Write failed for {unit.name}: {exc}")
 
-    # Generate __init__.py
-    try:
-        path, nbytes = _generate_init(output_dir, units, original_stem)
-        result.files_written.append(path)
-        result.bytes_written += nbytes
-    except OSError as exc:
-        result.errors.append(f"__init__.py generation failed: {exc}")
-
     return result
 
 
@@ -245,10 +266,13 @@ def run_decomposition(
                 if len(sources_to_decompose) >= 5:
                     break
 
+    # Determine the unified package directory name from the build target.
+    # Telemetry and verification tools expect: build_artifacts/decomposed/main/
+    target_names = metadata.get("compilation_targets", [])
+    pkg_name = target_names[0] if target_names else "main"
+    pkg_dir = output_dir / pkg_name
+
     for source_path in sources_to_decompose:
-        # Each source gets its own sub-package inside decomposed/
-        pkg_name = source_path.stem
-        pkg_dir = output_dir / pkg_name
         result = decompose_source(source_path, pkg_dir, min_lines=5)
         total_files.extend(result.files_written)
         total_bytes += result.bytes_written
@@ -264,6 +288,16 @@ def run_decomposition(
             total_files.extend(reflux_result.extra_files)
             total_bytes += reflux_result.extra_bytes
             errors.extend(reflux_result.errors)
+
+    # Generate a unified __init__.py that includes every split class AND
+    # function from all decomposed source files in the package directory.
+    if total_files:
+        try:
+            init_path, init_bytes = _generate_init(pkg_dir)
+            total_files.append(init_path)
+            total_bytes += init_bytes
+        except OSError as exc:
+            errors.append(f"__init__.py generation failed: {exc}")
 
     return {
         "decomposition_files_written": total_files,
