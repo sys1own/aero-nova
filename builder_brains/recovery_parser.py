@@ -24,9 +24,18 @@ class AeroTreeRecoveryParser:
     mutated in place.
     """
 
-    def __init__(self, language: tree_sitter.Language, parser: tree_sitter.Parser):
+    def __init__(
+        self,
+        language: tree_sitter.Language,
+        parser: tree_sitter.Parser,
+        language_name: str | None = None,
+    ):
         self.language = language
         self.parser = parser
+        # ``Language.name`` is ``None`` for many grammar bindings, so callers may
+        # pass an explicit name to drive rule dispatch. Falls back to the
+        # grammar's own name attribute when not provided.
+        self.language_name = language_name
         self.max_lookahead_steps = 5
         self.syntax_rules = {
             "python": {
@@ -105,7 +114,11 @@ class AeroTreeRecoveryParser:
         Dispatches on the configured language name and applies the matching
         language-specific recovery rule. Returns ``None`` when no rule applies.
         """
-        lang_name = self.language.name if hasattr(self.language, "name") else "python"
+        lang_name = self.language_name
+        if not lang_name and hasattr(self.language, "name"):
+            lang_name = self.language.name
+        if not lang_name:
+            lang_name = "python"
         rules = self.syntax_rules.get(lang_name, {})
         if not rules:
             return None
