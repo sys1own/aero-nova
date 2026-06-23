@@ -1,103 +1,105 @@
 # AeroNova
 
-**The Living Blueprint Engine — Build, Evolve, and Preserve**
-
-[![Python Version](https://img.shields.io/badge/python-3.10+-blue.svg)](https://python.org)
-[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Status](https://img.shields.io/badge/status-stable-brightgreen.svg)]()
-
-AeroNova is a next‑generation build tool that treats your **blueprint** as the single, persistent source of truth for your entire system. The code is ephemeral — the blueprint is permanent.
-
-> **AeroNova takes any source code across any programming language autonomously** — plus optional unstructured text (`.md`, `.txt`, `.pdf`) — and automatically transforms it into a **production‑ready, modular, optimised repository** — while letting you **preserve manual edits** across automated code regenerations.
-
-By abandoning language-specific compilers and non-deterministic probabilistic models, AeroNova uses formal grammar logic and universal syntax mappings to manage polyglot systems with zero-dependency runtime precision.
+AeroNova is an ultra-scale, high-performance polyglot build orchestration and automated code-splitting engine. Designed to parse, validate, and optimize intricate, tightly coupled micro-services and monolithic codebases, AeroNova handles the heavy lifting of codebase restructuring, dependency reflux mapping, and resilience-driven optimization passes.
 
 ---
 
-## Table of Contents
+## 🧬 Core Architecture
 
-- [Features](#features)
-- [Installation](#installation)
-- [Quick Start](#quick-start)
-- [The Living Blueprint DSL](#the-living-blueprint-dsl)
-- [Self-Hosting & Bootstrapping](#self-hosting--bootstrapping)
-- [CLI Commands](#cli-commands)
-- [Architecture](#architecture)
-- [Contributing](#contributing)
-- [License](#license)
+AeroNova decouples syntax from language quirks by processing source code through three interconnected layers:
+
+1. **Lossless Concrete Syntax Tree (CST):** Native source documents are ingested via Tree-sitter parsers to establish immutable structural geometries, preserving formatting bounds, comments, and whitespace invariants.
+2. **1D Linearized UAST Array:** The nested CST is flattened into a highly scannable, contiguous 1D Universal Abstract Syntax Tree array to maximize CPU cache locality during intense graph queries.
+3. **Declarative Term Rewriting System (TRS):** Code transformations, structural partitioning, and module splitting are governed by a algebraic rewrite loop that maps matching pattern matrices to target code targets safely.
 
 ---
 
-## Features
+## ⚡ Self-Healing v2 Engine
 
-| Feature | Description |
-|---------|-------------|
-| **Blueprint‑driven builds** | Declarative config under 10 lines; automatically infers DAG, dependencies, and boundaries. |
-| **Universal Parsing Front-End** | Ingests raw source code into a lossless Concrete Syntax Tree (CST) using Tree-sitter, retaining all layout data. |
-| **UAST Normalization** | Translates disparate language syntaxes into a unified 4-layer Universal Abstract Syntax Tree (Ψ: TL → U). |
-| **Polyglot Decomposition** | Employs an operational Term Rewriting System (TRS) to split monoliths across any syntax via S-expression query matching. |
-| **Self-Healing Import Reflux** | Autonomously detects missing cross-module symbols and duplicates, extracting shared utilities and injecting missing relative imports into generated sub-modules. |
-| **Staging Self-Hosting Core** | Supports self-targeting builds via an isolated shadow staging area and automated validation check pass before performing an atomic swap on disk. |
-| **Deterministic Self-Healing** | Intercepts compiler JSON diagnostics and mirrors language states with an internal LSP proxy to fix errors algorithmically. |
-| **Two-Tiered Structural Merging** | Merges manual edits safely using coarse-grained semantic identity matching and fine-grained Parent-Child-Successor (PCS) tree triple alignments. |
-| **Hardware Profiling** | Probes cache, cores, and SIMD registers (AVX‑512, ARM NEON) for hardware-specific structural optimizations. |
-| **Structural Memoisation** | Caches builds by structural UAST configuration rather than file text hashes (whitespace or comments never trigger rebuilds). |
+AeroNova features a resilient, multi-step **Automated Program Repair (APR)** pipeline. Instead of failing the build when encountering syntax mutations or missing context frames, the compiler engages an active three-tier recovery runtime:
 
----
-
-## Installation
-
-### Prerequisites
-
-- **Python 3.10+**
-- **Tree-sitter** runtime binaries
-- Local language compilers / LSPs mapped within your host environment paths (`clangd`, `rust-analyzer`, `pyright`, etc.)
-
-### Install from Source
-
-```bash
-git clone [https://github.com/sys1own/aero-nova.git](https://github.com/sys1own/aero-nova.git)
-cd aero-nova
-pip install -e .
 
 ```
 
-### Verify Installation
-
-```bash
-aero --help
+```
+[Malformed Source Asset] ───► [Syntactic Lookahead Recovery]
+                                          │ (In-Memory Patching)
+                                          ▼
+[Atomic Sandbox Swap]    ◄─── [Sandboxed Staging Loop] (B=3)
+      (Promoted)                          ▲
+                                          │ (TRS Reflux Injections)
+                              [Stateful LSP Diagnostic Binder]
 
 ```
 
+```
+
+### 1. Syntactic Lookahead Recovery
+The front-end scanner captures Tree-sitter `ERROR` and `MISSING` nodes in real time. Rather than halting execution, it computes a local search context and dynamically injects temporary structural tokens (such as missing block colons, trailing statements, or unclosed scope braces) to reconstruct a pseudo-valid CST stream in-memory.
+
+### 2. Stateful LSP Diagnostic Binding
+AeroNova hooks into background JSON-RPC proxy sessions with active Language Servers (`pyright`, `rust-analyzer`, `clangd`). Diagnostic errors are caught, parsed, and translated by the engine into deterministic TRS commands:
+* **`reportUndefinedVariable`** $\to$ Automatic lookup and binding of unresolved local symbol tokens.
+* **`reportMissingImports`** $\to$ Generation of missing absolute module framework references.
+* **`E0433 / E0405`** $\to$ Direct lookup and injection of missing Rust trait scopes and usage declarations.
+
+### 3. Sandboxed Staging & Verification Bounded Loop
+To ensure unverified modifications never pollute production files, all healing routines are isolated within a staging area located at `.aero/bootstrap_stage/`. 
+
+Let $W$ represent the production workspace directory and $S_w \subset W$ represent the set of malformed files targeted for repair. The shadow staging directory is defined as $C = \text{".aero/bootstrap_stage/"}$. For a target file $f \in S_w$, the isolation mapping $M$ duplicates the original source file into the staging workspace:
+
+$$f_c = M(f), \quad \text{where } \text{Path}(f_c) = C \mathbin{\Vert} \text{RelativePath}(f)$$
+
+Let $V(f_c) \in \{0, 1\}$ represent the compile-time validation function. This function executes compilation scripts and returns $1$ if the build succeeds without warnings or errors, and $0$ otherwise. Let $\mathcal{R}$ represent the set of syntactic and semantic repair operations. Each repair iteration $i$ applies a selected transformation $R_i \in \mathcal{R}$ to the staged file:
+
+$$f_c^{(i)} = R_i\left(f_c^{(i-1)}\right)$$
+
+The containment loop operates within a strict execution budget $B \in \mathbb{N}$ (capped at 3 retries). The transactional state machine strictly follows this logic:
+
+$$\text{State}(i) = \begin{cases} 
+\text{Swap}(f_c^{(i)}, f), & \text{if } V\left(f_c^{(i)}\right) = 1 \\
+\text{Loop}(i+1), & \text{if } V\left(f_c^{(i)}\right) = 0 \text{ and } i < B \\
+\text{Purge}(f_c) \land \text{Abort}, & \text{if } V\left(f_c^{(i)}\right) = 0 \text{ and } i = B 
+\end{cases}$$
+
+If validation fails on every attempt within the budget, the transaction is safely rolled back, the staging layout is purged, and a fallback status is logged without altering your code assets.
+
 ---
 
-## Quick Start
+## 🎨 Two-Tiered Structural Merging
 
-### 1. Create a Blueprint
+To guarantee that automated machine mutations never discard human formatting choices or documentation layout comments, the generator leverages a two-tier compaction alignment strategy:
 
-Create a `blueprint.aero` file in your project root:
+* **Tier 1: Semantic Entity Alignment:** Modifies structural fragments strictly by validating identity hashes ($\text{Hash}(\text{Type} \parallel \text{Name} \parallel \text{Scope})$). Unchanged functions, classes, and variable signatures are left fully untouched, locking in original code style structures.
+* **Tier 2: Parent-Child-Sibling (PCS) Trivia Alignment:** Extracts layout comments and formatting markers (trivia) from the original file stream, relative positions them to local AST nodes, and re-anchors them back cleanly above the newly repaired target entities.
+
+---
+
+## ⚙️ Configuration Setup (`blueprint.aero`)
+
+Build layouts are defined using a declarative blueprint configuration file located at the root of your target workspace:
 
 ```toml
 [system]
-name = "my-system"
+name = "production-cluster-pipeline"
 strategy = "universal-engine"
 ephemeral_code = true
 
 [context_registry]
-  [context_registry.core_logic]
-  path = "./main.py"
+  [context_registry.core_application]
+  path = "./src/app_logic.py"
   language = "python"
   preserve_original_logic = false
 
 [scaling]
-  auto_split_threshold = 400
-  max_module_complexity = 30
-  hierarchy_depth = 5
+  auto_split_threshold = 120       # Triggers splitting if node count token limits are breached
+  max_module_complexity = 12       # Forces structure decomposition rules on high branching metrics
+  hierarchy_depth = 4              # Determines directory tree nesting depth constraints
 
 [graph]
 dependencies = []
-boundaries = ["core_logic"]
-targets = ["core_logic"]
+boundaries = ["core_application"]
+targets = ["core_application"]
 
 [compiler]
 toolchain = "python3"
@@ -105,181 +107,33 @@ optimization_level = "aggressive"
 
 ```
 
-### 2. Run a Build
+---
+
+## 🚀 Usage Guide
+
+To execute a clean build and partition pass over an active target workspace, run the engine CLI interface:
 
 ```bash
-aero build
+python main.py build --workspace /path/to/your/target_sandbox
 
 ```
 
-AeroNova will parse your source, normalize it into a UAST, apply the Term Rewriting System, perform import reflux stabilization, and produce a modular, optimized codebase.
+### Pipeline Diagnostics Index
+
+When a build run completes, check the generated metrics report for diagnostic status signals:
+
+| Status Code | Subsystem Meaning | Safety Outcome |
+| --- | --- | --- |
+| `noop` | Target source contains 0 errors; no healing rules required. | File left pristine. |
+| `promoted` | Syntax or semantic errors discovered, completely fixed, and verified. | File atomically updated. |
+| `rolled_back` | Staged code modification attempts failed compilation check validation rules. | Staging wiped; file unchanged. |
+| `fallback_unrecoverable` | Severe parser syntax errors block tree construction even after lookahead repairs. | Safe exit; file unchanged. |
 
 ---
 
-## Self-Hosting & Bootstrapping
+## 📄 License
 
-AeroNova is fully capable of self-hosting, allowing you to point the engine directly at its own core architecture tree to drive structural refactoring, module decomposition, and self-evolution loop optimizations.
-
-To protect the active interpreter runtime thread against resource file locking issues (`PermissionError`) or unexpected compiler regressions during a self-build, the system implements an internal containment sequence:
-
-1. **Staging Isolation Gate:** When an active target path evaluates as an overlapping dependency within the framework's own execution source path tree, direct disk updates are safely intercepted.
-2. **Shadow Workspace Routing:** The engine routes all token mutations, modules splitting, and asset distributions into a separate hidden sandbox directory located under `.aero/bootstrap_stage/`.
-3. **Atomic Verification Pass:** AeroNova executes its internal structural validation scanner over the shadow staging directory. If, and only if, the code reports **0 structural anomalies** and **0 compilation errors**, it performs an atomic swap operation to safely overwrite the old system logic files on disk.
-
-To run a self-hosting build execution over AeroNova itself, use the pre-configured self-hosting blueprint:
-
-```bash
-aero build --blueprint self_host.aero
-
-```
-
----
-
-## The Living Blueprint DSL
-
-The `blueprint.aero` file uses standard native configuration tables to orchestrate system scaling, toolchains, and contextual boundaries without changing backend scripts:
-
-```toml
-[system]
-name = "my-system"
-strategy = "universal-engine"          # Powered by declarative grammar matching
-ephemeral_code = true                   # Code is regenerated; manual patches are stored as structural overlays
-
-[context_registry]
-  [context_registry.core_logic]
-  path = "./main.py"
-  language = "python"                     # Autonomously mapped via universal tree nodes
-  preserve_original_logic = false         # Set to false to allow automated decomposition/splitting
-
-[scaling]
-  auto_split_threshold = 400              # Lines before triggering Term Rewriting System decomposition
-  max_module_complexity = 30              # Forces optimization loops if branching node density is exceeded
-  hierarchy_depth = 5
-
-[graph]
-dependencies = []
-boundaries = ["core_logic"]
-targets = ["core_logic"]               # Tracked as a native validation list
-
-[compiler]
-toolchain = "python3"
-optimization_level = "aggressive"       # Configures optimization profiling rules
-
-[cortex]
-  exploration_epsilon = 0.150000          # Bounds reinforcement learning config paths
-  learning_rate = 0.00005
-
-```
-
----
-
-## CLI Commands
-
-AeroNova exposes an interactive multi-tool suite to drive the verification loop:
-
-| Command | Purpose |
-| --- | --- |
-| `build` | Generate code assets, compute the multi-objective Pareto cortex, and execute the self-healing toolchain loop. |
-| `check` | Validate blueprint semantics and check tree configurations without compilation. |
-| `infer` | Execute Tree-sitter queries to extract paths and map global system dependencies. |
-| `ingest` | Parse code layouts directly into the immutable structural database. |
-| `commit-overlay` | Run structural 3-way AST matching to seal manual edits into overlays. |
-| `validate` | Run the validation suite inside an isolated verification sandbox. |
-| `profile` | Display local hardware cache maps and vector optimization topologies. |
-
-### Example: Full Build Cycle
-
-```bash
-# Validate your blueprint
-aero check
-
-# Ingest source code
-aero ingest
-
-# Run the build with self-healing import reflux
-aero build
-
-# Commit any manual edits as structural overlays
-aero commit-overlay
-
-# Validate the final output
-aero validate
-
-```
-
----
-
-## Architecture
-
-For a deep dive into the architecture — including the ingestion pipeline, UAST normalization, polyglot decomposition, self-healing import reflux, and the two-tiered overlay system — see the [ARCHITECTURE.md](ARCHITECTURE.md) document.
-
-### High-Level Overview
-
-```
-blueprint.aero (Living DSL)
-│
-▼
-Tree-sitter Universal Parsing (CST Generation)
-│
-├── UAST Serialization & Taxonomy Mapping
-├── Declarative Term Rewriting System (TRS)
-└── Stateful LSP Diagnostics / JSON Error Interception
-│
-▼
-Two-Tiered Structural Merger (Semantic Entity & PCS Alignment)
-│
-▼
-Host Toolchain Introspection & Compilation Execution
-│
-▼
-Autonomous Dependency Reflux (Import Extraction & Optimization)
-│
-▼
-Verified, Production-Ready Modular Architecture
-
-```
-
-> **AeroNova — The blueprint is the system. Everything else is detail.**
-
----
-
-## Contributing
-
-Contributions are welcome! Here's how you can help:
-
-1. **Fork the repository** and create your branch from `main`.
-2. **Run the tests** to ensure nothing is broken:
-```bash
-python -m pytest
-
-```
-
-
-3. **Make your changes** — add tests for new functionality.
-4. **Ensure the test suite passes** and code style is consistent.
-5. **Submit a pull request** with a clear description of your changes.
-
-### Development Setup
-
-```bash
-git clone [https://github.com/sys1own/aero-nova.git](https://github.com/sys1own/aero-nova.git)
-cd aero-nova
-pip install -e ".[dev]"
-
-```
-
----
-
-## License
-
-AeroNova is released under the [MIT License](LICENSE).
-
----
-
-## Acknowledgements
-
-* [Tree-sitter](https://tree-sitter.github.io/tree-sitter/) — for lossless parsing and CST generation
-* The open-source community — for the language servers and toolchains that make polyglot builds possible
+AeroNova is open-source software licensed under the MIT License.
 
 ```
 
