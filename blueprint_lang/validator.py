@@ -26,7 +26,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 from .errors import BlueprintValidationError
-from .nodes import Block, Blueprint, ListValue, StringValue
+from .nodes import Block, Blueprint, ListValue, NumberValue, StringValue
 
 # Languages the wider Aero tool understands (Python via stdlib ``ast``; the rest
 # via tree-sitter -- see requirements.txt / ARCHITECTURE.md).
@@ -34,6 +34,7 @@ SUPPORTED_LANGUAGES = ("c", "cpp", "fortran", "python", "rust")
 
 # Value-type tags used by the schema below.
 _STRING = "string"
+_NUMBER = "number"
 _STRING_LIST = "string_list"
 _BOOL = "boolean"
 
@@ -85,6 +86,13 @@ SCHEMAS: Dict[str, BlockSchema] = {
         },
         required=("language", "sources"),
     ),
+    "scaling": BlockSchema(
+        fields={
+            "auto_split_threshold": _NUMBER,
+            "max_module_complexity": _NUMBER,
+            "hierarchy_depth": _NUMBER,
+        },
+    ),
 }
 
 
@@ -108,6 +116,13 @@ def _check_value_type(block_type: str, fld, expected: str) -> Optional[Blueprint
                 f"key '{fld.key}' in '{block_type}' must be a boolean (true/false)",
                 value.span,
                 label=f"expected true/false, found {value.kind}",
+            )
+    elif expected == _NUMBER:
+        if not isinstance(value, NumberValue):
+            return BlueprintValidationError(
+                f"key '{fld.key}' in '{block_type}' must be a number",
+                value.span,
+                label=f"expected a number, found {value.kind}",
             )
     elif expected == _STRING_LIST:
         if not isinstance(value, ListValue):
@@ -209,6 +224,18 @@ class Validator:
                         hint=f"the first 'project' is on line {projects[0].type_span.start.line}",
                     )
                 )
+
+        # At most one scaling block.
+        scaling_blocks = [b for b in blocks if b.type == "scaling"]
+        for extra in scaling_blocks[1:]:
+            errors.append(
+                BlueprintValidationError(
+                    "duplicate 'scaling' block; a blueprint may define at most one",
+                    extra.type_span,
+                    label="second 'scaling' here",
+                    hint=f"the first 'scaling' is on line {scaling_blocks[0].type_span.start.line}",
+                )
+            )
 
         # At least one target.
         if not targets:

@@ -75,10 +75,13 @@ class TestReadmeExampleSchema(unittest.TestCase):
 
 
 class TestShippedBlueprint(unittest.TestCase):
-    """The minimal blueprint.aero at the repo root must load cleanly."""
+    """The minimal TOML blueprint fixture must load cleanly."""
 
-    def test_loads_repo_blueprint(self):
-        bp = load_blueprint(os.path.join(_REPO_ROOT, "blueprint.aero"))
+    def test_loads_fixture_blueprint(self):
+        fixture = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "fixtures", "minimal_blueprint.aero"
+        )
+        bp = load_blueprint(fixture)
         self.assertEqual(bp.system.name, "aero-nova")
         self.assertEqual(bp.system.version, "0.1.0")
         self.assertEqual(bp.system.strategy, "microkernel")
@@ -90,6 +93,18 @@ class TestShippedBlueprint(unittest.TestCase):
         self.assertEqual(bp.scaling.auto_split_threshold, 1500)
         self.assertEqual(bp.scaling.max_module_complexity, 200)
         self.assertEqual(bp.scaling.hierarchy_depth, 4)
+
+    def test_production_blueprint_passes_check(self):
+        """The root blueprint.aero must pass strict DSL validation."""
+        import blueprint_lang
+
+        bp_path = os.path.join(_REPO_ROOT, "blueprint.aero")
+        if not os.path.exists(bp_path):
+            self.skipTest("blueprint.aero not present at repo root")
+        with open(bp_path, "r", encoding="utf-8") as fh:
+            source = fh.read()
+        error = blueprint_lang.check_source(source, filename=bp_path)
+        self.assertIsNone(error, f"Production blueprint.aero is invalid:\n{error}")
 
 
 class TestOptionalAndDefaults(unittest.TestCase):

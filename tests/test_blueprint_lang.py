@@ -498,7 +498,7 @@ class TestPublicApi(unittest.TestCase):
 
     def test_sample_file_is_valid(self):
         sample = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "blueprint.aero.sample"
+            os.path.dirname(os.path.abspath(__file__)), "fixtures", "blueprint.aero.sample"
         )
         if os.path.exists(sample):
             self.assertIsNone(bl.check_file(sample))
