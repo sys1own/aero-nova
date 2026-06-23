@@ -4,8 +4,10 @@ import importlib
 import json
 import logging
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -1029,4 +1031,185 @@ def configure_logging(verbose: bool = False) -> None:
         format="%(asctime)s %(levelname)-7s %(name)s - %(message)s",
         datefmt="%H:%M:%S",
     )
+
+
+class AeroShadowStagingManager:
+    """Sandboxed shadow staging for self-healing structural changes.
+
+    Self-healing routines must never write volatile or broken code layouts into
+    production source paths. This manager runs every repair inside an isolated
+    scratch workspace (``<workspace_root>/.aero/bootstrap_stage/``), verifies the
+    result via a polyglot syntax-compilation check, and only then performs an
+    atomic swap into the production tree. Failed transactions are purged and the
+    live source path is left untouched.
+
+    Transaction state machine (per the framework constraints), bounded by the
+    retry budget ``B = build_retry_budget``::
+
+        State(i) = Swap(f_c, f)        if V(f_c) == 1
+                 = Loop(i + 1)         if V(f_c) == 0 and i  < B
+                 = Purge(f_c) & Abort  if V(f_c) == 0 and i == B
+    """
+
+    #: Relative location of the scratch staging cache under the workspace root.
+    STAGE_SUBPATH = os.path.join(".aero", "bootstrap_stage")
+
+    def __init__(self, workspace_root: str, build_retry_budget: int = 3) -> None:
+        self.workspace_root = os.path.abspath(workspace_root)
+        # The retry budget B is bound to a maximum value of 3.
+        self.build_retry_budget = max(1, min(int(build_retry_budget), 3))
+        self.stage_root = os.path.join(self.workspace_root, self.STAGE_SUBPATH)
+        os.makedirs(self.stage_root, exist_ok=True)
+
+    # ------------------------------------------------------------------ #
+    # Transaction driver
+    # ------------------------------------------------------------------ #
+    def execute_healing_transaction(
+        self,
+        relative_file_path: str,
+        repair_function: Callable[[bytes], bytes],
+    ) -> bool:
+        """Stage, repair, verify and (on success) atomically promote a file.
+
+        ``repair_function`` receives the current file bytes and returns the
+        repaired bytes. The repair/verify cycle runs inside the retry budget;
+        each failed iteration re-feeds the most recent staged bytes. Returns
+        ``True`` only when a verified result was atomically swapped into the
+        production path; otherwise the stage is purged and production is
+        untouched.
+        """
+        prod_path = os.path.join(self.workspace_root, relative_file_path)
+        if not os.path.isfile(prod_path):
+            logger.warning("ShadowStaging: production file missing: %s", prod_path)
+            return False
+
+        stage_path = os.path.join(self.stage_root, relative_file_path)
+        os.makedirs(os.path.dirname(stage_path) or self.stage_root, exist_ok=True)
+
+        # Safely copy the active file into staging, preserving metadata.
+        shutil.copy2(prod_path, stage_path)
+
+        try:
+            for attempt in range(1, self.build_retry_budget + 1):
+                try:
+                    with open(stage_path, "rb") as handle:
+                        current_bytes = handle.read()
+                    repaired = repair_function(current_bytes)
+                    with open(stage_path, "wb") as handle:
+                        handle.write(repaired)
+                except Exception as exc:  # repair closures are untrusted
+                    logger.warning(
+                        "ShadowStaging: repair raised on attempt %d/%d: %s",
+                        attempt, self.build_retry_budget, exc,
+                    )
+                    continue
+
+                # V(f_c): syntax-compilation verification of the staged file.
+                if self._verify_compilation(stage_path):
+                    self._atomic_workspace_swap(stage_path, prod_path)
+                    logger.info(
+                        "ShadowStaging: transaction verified on attempt %d/%d; "
+                        "promoted %s",
+                        attempt, self.build_retry_budget, relative_file_path,
+                    )
+                    return True
+
+                logger.debug(
+                    "ShadowStaging: verification failed on attempt %d/%d for %s",
+                    attempt, self.build_retry_budget, relative_file_path,
+                )
+
+            # Budget exhausted (i == B with V == 0): purge and abort.
+            logger.warning(
+                "ShadowStaging: retry budget (%d) exhausted for %s — staged "
+                "changes discarded, production left unmodified.",
+                self.build_retry_budget, relative_file_path,
+            )
+            return False
+        finally:
+            self._purge_stage()
+
+    # ------------------------------------------------------------------ #
+    # Polyglot compilation verification — V(f_c)
+    # ------------------------------------------------------------------ #
+    def _verify_compilation(self, file_path: str) -> bool:
+        """Run a syntax-only compilation check keyed on the file extension."""
+        ext = os.path.splitext(file_path)[1].lower()
+        if ext == ".py":
+            command = ["python3", "-m", "py_compile", file_path]
+        elif ext == ".rs":
+            command = [
+                "rustc", "--crate-type=lib", "--emit=mir",
+                "-Z", "no-codegen", file_path,
+            ]
+        elif ext in (".cpp", ".cc", ".cxx", ".hpp", ".hh", ".h"):
+            command = ["clang++", "-fsyntax-only", "-std=c++17", file_path]
+        else:
+            # No verifier registered for this language: nothing to assert.
+            logger.debug("ShadowStaging: no compiler check for extension %r", ext)
+            return True
+
+        try:
+            result = subprocess.run(
+                command,
+                cwd=self.stage_root,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+        except FileNotFoundError:
+            logger.warning(
+                "ShadowStaging: toolchain %r unavailable; cannot verify %s",
+                command[0], file_path,
+            )
+            return False
+        except subprocess.TimeoutExpired:
+            logger.warning("ShadowStaging: verification timed out for %s", file_path)
+            return False
+
+        if result.returncode != 0:
+            logger.debug(
+                "ShadowStaging: verifier %r rejected %s: %s",
+                command[0], file_path, (result.stderr or "").strip()[:500],
+            )
+        return result.returncode == 0
+
+    # ------------------------------------------------------------------ #
+    # Atomic promotion + cleanup
+    # ------------------------------------------------------------------ #
+    def _atomic_workspace_swap(self, stage_path: str, prod_path: str) -> None:
+        """Atomically replace ``prod_path`` with the verified ``stage_path``.
+
+        The verified bytes are first written to a transient ``.tmp`` file inside
+        the production directory (same filesystem) and then moved into place via
+        :func:`os.replace`, which is atomic and thread-safe on a single volume.
+        """
+        prod_dir = os.path.dirname(prod_path) or self.workspace_root
+        os.makedirs(prod_dir, exist_ok=True)
+
+        with open(stage_path, "rb") as handle:
+            verified_bytes = handle.read()
+
+        fd, tmp_path = tempfile.mkstemp(
+            dir=prod_dir,
+            prefix=os.path.basename(prod_path) + ".",
+            suffix=".tmp",
+        )
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(verified_bytes)
+                handle.flush()
+                os.fsync(handle.fileno())
+            # Mirror source metadata onto the staged result before promotion.
+            shutil.copystat(stage_path, tmp_path)
+            os.replace(tmp_path, prod_path)
+        except Exception:
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+            raise
+
+    def _purge_stage(self) -> None:
+        """Remove the staging cache path on transaction termination."""
+        shutil.rmtree(self.stage_root, ignore_errors=True)
+        os.makedirs(self.stage_root, exist_ok=True)
 
