@@ -53,6 +53,7 @@ class ScaffoldResult:
     out_of_tree: bool
     language: str = "rust"
     build: Optional[Dict[str, Any]] = None
+    merge: Optional[Dict[str, Any]] = None
     messages: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -64,6 +65,7 @@ class ScaffoldResult:
             "out_of_tree": self.out_of_tree,
             "language": self.language,
             "build": self.build,
+            "merge": self.merge,
         }
 
 
@@ -99,6 +101,7 @@ class ScaffoldEngine:
         decomposition_mode: Optional[str] = None,
         prune_imports: bool = False,
         generate_tests: bool = False,
+        merge_active: bool = False,
     ) -> ScaffoldResult:
         context = context or {}
 
@@ -159,6 +162,7 @@ class ScaffoldEngine:
             build=build,
             keep=keep,
             generate_tests=generate_tests,
+            merge_active=merge_active,
         )
 
     # ------------------------------------------------------------------
@@ -176,6 +180,7 @@ class ScaffoldEngine:
         build: bool,
         keep: Optional[bool],
         generate_tests: bool = False,
+        merge_active: bool = False,
     ) -> ScaffoldResult:
         source_text = entry.read_text()
         shield_report = self._shield_rust(entry, source_text, compatibility_shims=compatibility_shims)
@@ -207,9 +212,20 @@ class ScaffoldEngine:
             repo_dict["test_matrix"] = matrix.to_dict()
 
         build_info: Optional[Dict[str, Any]] = None
+        merge_info: Optional[Dict[str, Any]] = None
         if build:
             build_info = self._build_rust_with_recovery(repo).to_dict()
             build_info["language"] = "rust"
+            if merge_active:
+                merge_info = self._merge_active(
+                    workspace.root, spec, succeeded=bool(build_info.get("succeeded"))
+                )
+        elif merge_active:
+            merge_info = {
+                "merged": False,
+                "reason": "--merge-active requires --build (nothing was compiled)",
+            }
+            self._log("merge: skipped — --merge-active requires a successful --build")
 
         return ScaffoldResult(
             source=entry.to_dict(),
@@ -219,7 +235,26 @@ class ScaffoldEngine:
             out_of_tree=True,
             language="rust",
             build=build_info,
+            merge=merge_info,
         )
+
+    def _merge_active(self, workspace_root: Path, spec: Any, *, succeeded: bool) -> Dict[str, Any]:
+        """Merge the verified cdylib into the live runtime extension layer."""
+        from src.scaffold.active_merge import merge_active as _merge
+
+        if not succeeded:
+            self._log("merge: skipped — out-of-tree build did not succeed")
+            return {"merged": False, "reason": "out-of-tree build did not succeed"}
+
+        module_name = spec.python_module or spec.name
+        result = _merge(workspace_root, spec.name, module_name)
+        if result.merged:
+            self._log(f"merge: {' / '.join(result.notes)}")
+            live = "now live in-process" if result.loaded else "staged for next start"
+            self._log(f"merge: '{module_name}' -> {result.destination} ({live})")
+        else:
+            self._log(f"merge: failed — {result.reason}")
+        return result.to_dict()
 
     def _shield_rust(
         self,

@@ -117,12 +117,18 @@ def infer_dependencies(source: str, overrides: Optional[Dict[str, Any]] = None) 
 
 
 def detect_pymodule(source: str) -> Optional[str]:
-    """Find the ``#[pymodule]`` function name, if the source defines one."""
-    match = re.search(r"#\[pymodule\][^\n]*\n\s*(?:pub\s+)?fn\s+([A-Za-z_]\w*)", source)
+    """Find the ``#[pymodule]`` name, if the source defines one.
+
+    Handles both the function form (``#[pymodule] fn name``) and the modern
+    declarative form (``#[pymodule] mod name``), across one or multiple lines.
+    """
+    match = re.search(
+        r"#\[pymodule\][^\n]*\n\s*(?:pub\s+)?(?:fn|mod)\s+([A-Za-z_]\w*)", source
+    )
     if match:
         return match.group(1)
-    # Some sources use `#[pymodule] fn name(...)` on one line.
-    match = re.search(r"#\[pymodule\]\s*(?:pub\s+)?fn\s+([A-Za-z_]\w*)", source)
+    # Some sources put it on one line: `#[pymodule] fn name(...)` / `mod name {`.
+    match = re.search(r"#\[pymodule\]\s*(?:pub\s+)?(?:fn|mod)\s+([A-Za-z_]\w*)", source)
     return match.group(1) if match else None
 
 
