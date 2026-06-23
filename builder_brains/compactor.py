@@ -10,10 +10,12 @@ Implements:
 Pipeline entry point: evaluate(metadata, hyper_params)
 """
 import ast
+import difflib
 import hashlib
 import logging
 import math
 import os
+import re
 import string
 import time
 from collections import Counter, defaultdict
@@ -529,3 +531,118 @@ def evaluate(metadata: Dict[str, Any], hyper_params: Dict[str, Any]) -> Dict[str
     metadata['compactor_status'] = 'budget_exceeded' if wall_seconds > wall_limit else 'complete'
     logger.info('Compactor pipeline finished in %.3fs — status=%s', wall_seconds, metadata['compactor_status'])
     return metadata
+
+
+# Matches a line whose first non-space content begins a comment in any of the
+# supported dialects: Python (``#``) and C-family (``//``, ``/* ... */``, ``*``).
+_COMMENT_LINE_RE = re.compile(r'^\s*(#|//|/\*|\*)')
+
+
+class TwoTieredStructuralMerger:
+    """Two-tiered structural merge that preserves human code layout.
+
+    Automated repairs tend to reflow whitespace, collapse blank lines and drop
+    developer comments. This merger reconciles a machine-synthesized rewrite with
+    the developer's original source using fine-grained line sequence matching:
+
+      * **Tier 1 — equal blocks**: emit the developer's *original* lines verbatim,
+        keeping their spacing, indentation and stylistic choices intact.
+      * **Tier 2 — replaced blocks**: hand the conflicting line lists to
+        :meth:`_align_trivia_blocks`, which re-attaches the original trivia
+        (comments / blank lines) above the synthesized replacement.
+      * **Deleted blocks**: rescue any comments the rewrite would have dropped and
+        re-append them above the following node rather than losing them.
+      * **Inserted blocks**: accept the synthesized lines as-is.
+
+    The implementation streams opcode-by-opcode and only ever holds the slices of
+    the block currently being processed, keeping the memory profile flat for
+    large files.
+    """
+
+    def merge_clean_reconstruction(
+        self, original_source: str, synthesized_source: str
+    ) -> str:
+        """Merge ``synthesized_source`` onto ``original_source`` preserving layout."""
+        original_lines = original_source.splitlines()
+        synthesized_lines = synthesized_source.splitlines()
+
+        matcher = difflib.SequenceMatcher(
+            a=original_lines, b=synthesized_lines, autojunk=False
+        )
+
+        merged: List[str] = []
+        # Comments rescued from a deleted block, queued to be re-emitted above
+        # the next surviving node.
+        carried_comments: List[str] = []
+
+        for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+            if tag == 'equal':
+                # Tier 1: keep the developer's lines exactly as written.
+                if carried_comments:
+                    merged.extend(carried_comments)
+                    carried_comments = []
+                merged.extend(original_lines[i1:i2])
+
+            elif tag == 'replace':
+                # Tier 2: reconcile trivia between the two conflicting blocks.
+                block = self._align_trivia_blocks(
+                    original_lines[i1:i2], synthesized_lines[j1:j2]
+                )
+                if carried_comments:
+                    block = carried_comments + block
+                    carried_comments = []
+                merged.extend(block)
+
+            elif tag == 'insert':
+                if carried_comments:
+                    merged.extend(carried_comments)
+                    carried_comments = []
+                merged.extend(synthesized_lines[j1:j2])
+
+            elif tag == 'delete':
+                # Rescue comments from the removed chunk; carry them to the next
+                # surviving node instead of discarding developer documentation.
+                carried_comments.extend(
+                    line for line in original_lines[i1:i2]
+                    if _COMMENT_LINE_RE.match(line)
+                )
+
+        # Any comments rescued from a trailing deletion still deserve a home.
+        if carried_comments:
+            merged.extend(carried_comments)
+
+        # Preserve a trailing newline when either input had one.
+        trailing = (
+            '\n'
+            if original_source.endswith('\n') or synthesized_source.endswith('\n')
+            else ''
+        )
+        return '\n'.join(merged) + trailing if merged else trailing
+
+    def _align_trivia_blocks(
+        self, original_lines: List[str], synthesized_lines: List[str]
+    ) -> List[str]:
+        """Re-attach original trivia above a synthesized replacement block.
+
+        Gathers the comments (and meaningful blank spacing) from the original
+        block, drops any of those comments the synthesizer already reproduced to
+        avoid duplication, and prepends the survivors above the synthesized
+        lines.
+        """
+        preserved_comments = [
+            line for line in original_lines if _COMMENT_LINE_RE.match(line)
+        ]
+
+        # Filter the synthesized stream so we never duplicate a comment it has
+        # already emitted (compared on trimmed text to ignore reflowed spacing).
+        synthesized_comment_text = {
+            line.strip()
+            for line in synthesized_lines
+            if _COMMENT_LINE_RE.match(line)
+        }
+        deduped_comments = [
+            comment for comment in preserved_comments
+            if comment.strip() not in synthesized_comment_text
+        ]
+
+        return deduped_comments + synthesized_lines
