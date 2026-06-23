@@ -19,6 +19,8 @@ Supported actions:
 from __future__ import annotations
 
 import logging
+import re
+import sys
 from typing import Any, Dict, List
 
 logger = logging.getLogger(__name__)
@@ -65,6 +67,9 @@ class AeroDependencyRefluxEngine:
             else:
                 logger.debug("reflux: unknown action kind %r", kind)
 
+        # Apply standard import grouping to the final output (Python only).
+        if file_path.endswith(".py"):
+            lines = self._group_python_imports(lines)
         return "".join(lines).encode("utf-8")
 
     # ------------------------------------------------------------------ #
@@ -131,6 +136,133 @@ class AeroDependencyRefluxEngine:
         """True when ``statement`` already exists (idempotency guard)."""
         target = statement.strip()
         return any(line.strip() == target for line in lines)
+
+    # ------------------------------------------------------------------ #
+    # Import grouping
+    # ------------------------------------------------------------------ #
+    # Python standard library module names for import classification.
+    _STDLIB_MODULES: frozenset = (
+        frozenset(sys.stdlib_module_names)
+        if hasattr(sys, "stdlib_module_names")
+        else frozenset({
+            "abc", "aifc", "argparse", "ast", "asyncio", "atexit", "base64",
+            "binascii", "builtins", "calendar", "cgi", "cmd", "codecs",
+            "collections", "colorsys", "compileall", "concurrent", "configparser",
+            "contextlib", "copy", "copyreg", "csv", "ctypes", "curses",
+            "dataclasses", "datetime", "dbm", "decimal", "difflib", "dis",
+            "distutils", "doctest", "email", "enum", "errno", "faulthandler",
+            "filecmp", "fileinput", "fnmatch", "fractions", "ftplib",
+            "functools", "gc", "getopt", "getpass", "gettext", "glob",
+            "gzip", "hashlib", "heapq", "hmac", "html", "http", "imaplib",
+            "importlib", "inspect", "io", "ipaddress", "itertools", "json",
+            "keyword", "linecache", "locale", "logging", "lzma", "mailbox",
+            "math", "mimetypes", "mmap", "multiprocessing", "netrc",
+            "numbers", "operator", "optparse", "os", "pathlib", "pdb",
+            "pickle", "pkgutil", "platform", "plistlib", "pprint",
+            "profile", "pstats", "queue", "quopri", "random", "re",
+            "readline", "reprlib", "resource", "rlcompleter", "runpy",
+            "sched", "secrets", "select", "selectors", "shelve", "shlex",
+            "shutil", "signal", "site", "smtplib", "socket", "socketserver",
+            "sqlite3", "ssl", "stat", "statistics", "string", "struct",
+            "subprocess", "sys", "sysconfig", "syslog", "tarfile", "tempfile",
+            "test", "textwrap", "threading", "time", "timeit", "tkinter",
+            "token", "tokenize", "tomllib", "trace", "traceback",
+            "tracemalloc", "turtle", "types", "typing", "unicodedata",
+            "unittest", "urllib", "uuid", "venv", "warnings", "wave",
+            "weakref", "webbrowser", "xml", "xmlrpc", "zipfile", "zipimport",
+            "zlib", "_thread", "__future__",
+        })
+    )
+
+    # Pattern to detect top-level import/from-import lines.
+    _IMPORT_LINE_RE: re.Pattern = re.compile(
+        r"^\s*(import\s+\S+|from\s+\S+\s+import\s+.+)\s*$"
+    )
+
+    # Known project-internal namespace prefixes.
+    _PROJECT_PREFIXES = ("aero_nova",)
+
+    @classmethod
+    def _classify_import(cls, line: str) -> int:
+        """Classify an import line into group 1 (stdlib), 2 (third-party), or 3 (project)."""
+        stripped = line.strip()
+        # Extract the top-level module name.
+        if stripped.startswith("from "):
+            module = stripped.split()[1].split(".")[0]
+        elif stripped.startswith("import "):
+            module = stripped.split()[1].split(".")[0].rstrip(",")
+        else:
+            return 2  # fallback
+
+        # Project-internal check.
+        for prefix in cls._PROJECT_PREFIXES:
+            if module == prefix or stripped.split()[1].startswith(prefix + "."):
+                return 3
+
+        # Standard library check.
+        if module in cls._STDLIB_MODULES:
+            return 1
+
+        return 2  # third-party
+
+    @classmethod
+    def _group_python_imports(cls, lines: List[str]) -> List[str]:
+        """Re-sort and group all imports at the header of the file.
+
+        Imports are collected from the header section (after docstrings/comments
+        and before the first non-import statement), categorised, sorted
+        alphabetically within each group, then re-inserted with exactly one
+        blank line between each group.
+        """
+        header_end = cls._python_header_offset(lines)
+
+        # Find the import section boundaries: starts at header_end, ends when
+        # we encounter a non-import, non-blank, non-comment line.
+        import_start = header_end
+        idx = import_start
+        n = len(lines)
+        import_lines: List[str] = []
+
+        while idx < n:
+            stripped = lines[idx].strip()
+            if cls._IMPORT_LINE_RE.match(lines[idx]):
+                import_lines.append(lines[idx])
+                idx += 1
+            elif stripped == "" or stripped.startswith("#"):
+                # Blank or comment between imports — skip for now.
+                idx += 1
+            else:
+                break
+        import_end = idx
+
+        if not import_lines:
+            return lines
+
+        # Categorise.
+        groups: Dict[int, List[str]] = {1: [], 2: [], 3: []}
+        for imp_line in import_lines:
+            grp = cls._classify_import(imp_line)
+            normalised = imp_line.rstrip("\n\r") + "\n"
+            if normalised not in groups[grp]:
+                groups[grp].append(normalised)
+
+        # Sort within each group.
+        for grp in groups:
+            groups[grp].sort(key=lambda s: s.strip().lower())
+
+        # Assemble grouped block.
+        grouped_block: List[str] = []
+        for grp_id in (1, 2, 3):
+            if groups[grp_id]:
+                if grouped_block:
+                    grouped_block.append("\n")
+                grouped_block.extend(groups[grp_id])
+
+        # Ensure a trailing blank line after the import block for spacing.
+        if grouped_block and (import_end < n and lines[import_end].strip() != ""):
+            grouped_block.append("\n")
+
+        return lines[:import_start] + grouped_block + lines[import_end:]
 
     # ------------------------------------------------------------------ #
     # Rust patches
