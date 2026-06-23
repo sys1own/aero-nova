@@ -81,6 +81,25 @@ def _needs_type_hint_fallback(source: str) -> bool:
     return not _has_typing_coverage(source)
 
 
+def hoist_future_flags(content: str) -> str:
+    """Return *content* with every ``from __future__`` line at the very top.
+
+    Centralized exit-gate filter: deduplicates compiler flags and forces
+    them to line 1, ahead of any generated docstring, imports, or body text.
+    """
+    lines = content.splitlines()
+    future_lines = [l for l in lines if l.strip().startswith("from __future__ import")]
+    remaining_lines = [l for l in lines if not l.strip().startswith("from __future__ import")]
+    if not future_lines:
+        return content
+    unique_futures = list(dict.fromkeys(future_lines))
+    return "\n".join(unique_futures + remaining_lines) + "\n"
+
+
+# Preserve backward compatibility for internal callers that used the old name.
+_hoist_future_imports = hoist_future_flags
+
+
 def _extract_future_imports(tree: ast.Module, source: str) -> str:
     """Return the monolith's ``from __future__`` statements (ordered, de-duped).
 
@@ -204,7 +223,7 @@ def _write_module(
     parts.append(header)
     parts.append(body)
 
-    content = "".join(parts)
+    content = hoist_future_flags("".join(parts))
 
     file_path.write_text(content, encoding="utf-8")
     return str(file_path), len(content.encode("utf-8"))
@@ -259,7 +278,7 @@ def _generate_init(
             lines.append(f"from .{module_name} import {unit.name}")
 
     lines.append("")  # trailing newline
-    content = "\n".join(lines)
+    content = hoist_future_flags("\n".join(lines))
     init_path.write_text(content, encoding="utf-8")
     return str(init_path), len(content.encode("utf-8"))
 

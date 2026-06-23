@@ -42,6 +42,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
+from src.decomposition.splitter import hoist_future_flags
 from src.scaffold.import_pruner import prune_dead_imports, render_imports
 
 Logger = Callable[[str], None]
@@ -95,38 +96,32 @@ def _needs_type_hint_fallback(source: str) -> bool:
 def _hoist_future_imports(source: str) -> str:
     """Return *source* with every ``from __future__`` line hoisted to the top.
 
-    The hoisted block is placed immediately after any leading encoding cookie
-    (which must remain on line 1 or 2) and before any module docstring, tool
-    banner, or other imports.  This makes the operation idempotent: re-running
-    the scaffolder on its own output never duplicates or pushes the future
-    imports down.
+    Delegates to the centralized :func:`hoist_future_flags` helper while
+    keeping any leading encoding cookie on line 1 or 2 (Python requires it
+    there). This makes the operation idempotent: re-running the scaffolder on
+    its own output never duplicates or pushes the future imports down.
     """
     lines = source.splitlines(keepends=True)
-    future_indices: List[int] = []
-    for i, line in enumerate(lines):
-        if line.lstrip().startswith("from __future__"):
-            future_indices.append(i)
-    if not future_indices:
+    if not lines:
         return source
 
-    future_lines = [lines[i] for i in future_indices]
-    # Keep everything else in original order.
-    other_lines = [line for i, line in enumerate(lines) if i not in future_indices]
-
-    # Encoding declarations must stay on line 1 or 2.
-    encoding_pos = -1
-    for i, line in enumerate(other_lines):
-        if i >= 2:
-            break
+    encoding_lines: List[str] = []
+    rest_lines: List[str] = []
+    for i, line in enumerate(lines):
         stripped = line.strip()
-        if stripped.startswith("#") and "coding" in stripped:
-            encoding_pos = i
-            break
+        if (
+            i < 2
+            and stripped.startswith("#")
+            and "coding" in stripped
+        ):
+            encoding_lines.append(line)
+        else:
+            rest_lines.append(line)
 
-    insert_pos = encoding_pos + 1 if encoding_pos >= 0 else 0
-    for line in reversed(future_lines):
-        other_lines.insert(insert_pos, line)
-    return "".join(other_lines)
+    hoisted = hoist_future_flags("".join(rest_lines))
+    if encoding_lines:
+        return "".join(encoding_lines) + hoisted
+    return hoisted
 
 
 def _inject_type_hint_fallbacks(source: str) -> str:
