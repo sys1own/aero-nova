@@ -28,6 +28,7 @@ from __future__ import annotations
 import ast
 import collections
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -88,12 +89,61 @@ def _imported_names(tree: ast.Module) -> Set[str]:
     return names
 
 
+def _annotation_names(node: Optional[ast.AST]) -> Set[str]:
+    """Return all simple names referenced in a type annotation expression.
+
+    Handles both AST annotation nodes and PEP 563 stringified annotations.
+    """
+    names: Set[str] = set()
+    if node is None:
+        return names
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        try:
+            ann_tree = ast.parse(node.value, mode="eval")
+        except SyntaxError:
+            return names
+        names.update(n.id for n in ast.walk(ann_tree) if isinstance(n, ast.Name))
+    else:
+        names.update(
+            n.id
+            for n in ast.walk(node)
+            if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)
+        )
+    return names
+
+
+def _signature_names(tree: ast.Module) -> Set[str]:
+    """Collect type-annotation symbols from function signatures.
+
+    Traverses every ``ast.FunctionDef`` and ``ast.AsyncFunctionDef`` and
+    extracts names from positional/keyword-only/default argument annotations,
+    ``*args``/``**kwargs`` annotations, and the return-type annotation.
+    """
+    names: Set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            args = node.args
+            for arg in args.posonlyargs + args.args + args.kwonlyargs:
+                names.update(_annotation_names(arg.annotation))
+            if args.vararg and args.vararg.annotation:
+                names.update(_annotation_names(args.vararg.annotation))
+            if args.kwarg and args.kwarg.annotation:
+                names.update(_annotation_names(args.kwarg.annotation))
+            names.update(_annotation_names(node.returns))
+    return names
+
+
 def _used_names(tree: ast.Module) -> Set[str]:
-    """Return all ``ast.Name`` identifiers loaded anywhere in *tree*."""
+    """Return all ``ast.Name`` identifiers loaded anywhere in *tree*.
+
+    Includes names appearing in function type signatures so that dependency
+    reflux treats annotation symbols as mandatory module parameters.
+    """
     names: Set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
             names.add(node.id)
+    names.update(_signature_names(tree))
     return names
 
 
@@ -103,6 +153,100 @@ def _function_source(path: Path, node: ast.stmt) -> str:
     start = node.lineno - 1
     end = node.end_lineno if node.end_lineno else start + 1
     return "".join(lines[start:end])
+
+
+# ---------------------------------------------------------------------------
+# Type-hint fallback import layer
+# ---------------------------------------------------------------------------
+
+_TYPE_HINT_FALLBACK_TYPING = "from typing import Optional, Union, Any, List, Dict, Callable, Iterator"
+_TYPE_HINT_FALLBACK_PATHLIB = "from pathlib import Path"
+_TYPE_HINT_RE: re.Pattern[str] = re.compile(
+    r"(?:\b(?:Optional|Union|List|Dict|Callable|Iterator|Any)\s*\[)|(?::\s*Path\b)"
+)
+
+
+def _has_typing_coverage(source: str) -> bool:
+    """True when the source imports ``typing`` or ``pathlib`` directly."""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return False
+    for node in ast.iter_child_nodes(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name in ("typing", "pathlib"):
+                    return True
+        elif isinstance(node, ast.ImportFrom):
+            if node.module in ("typing", "pathlib"):
+                return True
+    return False
+
+
+def _needs_type_hint_fallback(source: str) -> bool:
+    """True when the source uses common type-hint patterns without coverage."""
+    if not _TYPE_HINT_RE.search(source):
+        return False
+    return not _has_typing_coverage(source)
+
+
+def _inject_type_hint_fallbacks(path: Path) -> bool:
+    """Insert typing/pathlib fallback imports if the file needs them.
+
+    Fallbacks are placed directly below any ``__future__`` imports so the
+    file compiles and executes even when upstream parsing anomalies failed
+    to carry the parent source's typing imports into the split child.
+    """
+    source = path.read_text(encoding="utf-8")
+    if not _needs_type_hint_fallback(source):
+        return False
+
+    typing_present = _TYPE_HINT_FALLBACK_TYPING in source
+    pathlib_present = _TYPE_HINT_FALLBACK_PATHLIB in source
+    if typing_present and pathlib_present:
+        return False
+
+    lines = source.splitlines(keepends=True)
+    insert_pos = 0
+    seen_future = False
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("from __future__"):
+            insert_pos = i + 1
+            seen_future = True
+        elif seen_future and stripped == "":
+            insert_pos = i + 1
+        elif seen_future:
+            break
+
+    if not seen_future:
+        # No __future__ header: place fallback after the leading docstring/comments.
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            if (
+                stripped.startswith("#")
+                or stripped == ""
+                or stripped.startswith('"""')
+                or stripped.startswith("'''")
+            ):
+                insert_pos = i + 1
+            else:
+                break
+
+    additions: List[str] = []
+    if not typing_present:
+        additions.append(_TYPE_HINT_FALLBACK_TYPING + "\n")
+    if not pathlib_present:
+        additions.append(_TYPE_HINT_FALLBACK_PATHLIB + "\n")
+    if not additions:
+        return False
+
+    additions.append("\n")
+    for line in reversed(additions):
+        lines.insert(insert_pos, line)
+
+    path.write_text("".join(lines), encoding="utf-8")
+    return True
 
 
 def _normalize_body(source: str) -> str:
@@ -173,6 +317,11 @@ def consolidate_shared_utils(pkg_dir: Path) -> Tuple[RefluxResult, Dict[str, str
         source_lines = fpath.read_text(encoding="utf-8").splitlines(keepends=True)
         for node in ast.iter_child_nodes(tree):
             if isinstance(node, (ast.Import, ast.ImportFrom)):
+                # Compiler-flag __future__ imports must never be moved below a
+                # generated docstring; they are kept in place at the top of each
+                # leaf module instead of being copied into utils.py.
+                if isinstance(node, ast.ImportFrom) and node.module == "__future__":
+                    continue
                 start = node.lineno - 1
                 end = node.end_lineno if node.end_lineno else start + 1
                 imp_text = "".join(source_lines[start:end]).rstrip()
@@ -461,6 +610,17 @@ def run_reflux(pkg_dir: Path) -> RefluxResult:
     injected, patched = inject_missing_imports(pkg_dir, utils_symbols)
     result.imports_injected = injected
     result.files_patched = list(set(result.files_patched) | set(patched))
+
+    # Pass 3: blanket type-hint fallback for split children that use
+    # structural type hints but arrived without their typing/pathlib imports.
+    leaf_files = sorted(
+        p for p in pkg_dir.iterdir()
+        if p.suffix == ".py" and p.name != "__init__.py"
+    )
+    for fpath in leaf_files:
+        if _inject_type_hint_fallbacks(fpath):
+            if str(fpath) not in result.files_patched:
+                result.files_patched.append(str(fpath))
 
     # Validation: scan for remaining anomalies
     anomalies = scan_anomalies(pkg_dir)

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import ast
 import os
+import re
 import textwrap
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -46,6 +47,37 @@ def _collect_imports(tree: ast.Module) -> str:
         if isinstance(node, (ast.Import, ast.ImportFrom)):
             import_lines.append(ast.get_source_segment("", node) or "")
     return ""
+
+
+_TYPE_HINT_FALLBACK_TYPING = "from typing import Optional, Union, Any, List, Dict, Callable, Iterator"
+_TYPE_HINT_FALLBACK_PATHLIB = "from pathlib import Path"
+_TYPE_HINT_RE: re.Pattern[str] = re.compile(
+    r"(?:\b(?:Optional|Union|List|Dict|Callable|Iterator|Any)\s*\[)|(?::\s*Path\b)"
+)
+
+
+def _has_typing_coverage(source: str) -> bool:
+    """True when the source imports ``typing`` or ``pathlib`` directly."""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return False
+    for node in ast.iter_child_nodes(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name in ("typing", "pathlib"):
+                    return True
+        elif isinstance(node, ast.ImportFrom):
+            if node.module in ("typing", "pathlib"):
+                return True
+    return False
+
+
+def _needs_type_hint_fallback(source: str) -> bool:
+    """True when the source uses common type-hint patterns without coverage."""
+    if not _TYPE_HINT_RE.search(source):
+        return False
+    return not _has_typing_coverage(source)
 
 
 def _extract_future_imports(tree: ast.Module, source: str) -> str:
@@ -149,13 +181,29 @@ def _write_module(
     module_name = f"{original_stem}_{unit.name.lower()}"
     file_path = output_dir / f"{module_name}.py"
 
-    header = f'"""Auto-decomposed from monolith: {unit.kind} {unit.name}."""\n\n'
     # Strict __future__ hoisting: compiler-flag imports go on the absolute first
     # lines, ahead of the generated docstring/imports, so they are never trapped
     # below a statement (which is an unrecoverable SyntaxError).
     future = unit.future_imports.strip()
-    prologue = f"{future}\n\n" if future else ""
-    content = prologue + header + unit.imports + "\n\n" + unit.source + "\n"
+    header = f'"""Auto-decomposed from monolith: {unit.kind} {unit.name}."""\n\n'
+    body = unit.imports + "\n\n" + unit.source + "\n"
+
+    # Assemble the file buffer with __future__ first, then optional type-hint
+    # blanket fallback directly below it, then the generated docstring and body.
+    parts: List[str] = []
+    if future:
+        parts.append(future + "\n")
+    if _needs_type_hint_fallback(body):
+        if _TYPE_HINT_FALLBACK_TYPING not in body:
+            parts.append(_TYPE_HINT_FALLBACK_TYPING + "\n")
+        if _TYPE_HINT_FALLBACK_PATHLIB not in body:
+            parts.append(_TYPE_HINT_FALLBACK_PATHLIB + "\n")
+        if future or parts:
+            parts.append("\n")
+    parts.append(header)
+    parts.append(body)
+
+    content = "".join(parts)
 
     file_path.write_text(content, encoding="utf-8")
     return str(file_path), len(content.encode("utf-8"))

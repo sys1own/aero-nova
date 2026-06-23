@@ -37,6 +37,7 @@ sources and empty mappings.
 from __future__ import annotations
 
 import ast
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
@@ -58,6 +59,94 @@ def _is_future_import(line: str) -> bool:
     hoisted separately from the general import block.
     """
     return line.lstrip().startswith("from __future__")
+
+
+_TYPE_HINT_FALLBACK_TYPING = "from typing import Optional, Union, Any, List, Dict, Callable, Iterator"
+_TYPE_HINT_FALLBACK_PATHLIB = "from pathlib import Path"
+_TYPE_HINT_RE: re.Pattern[str] = re.compile(
+    r"(?:\b(?:Optional|Union|List|Dict|Callable|Iterator|Any)\s*\[)|(?::\s*Path\b)"
+)
+
+
+def _has_typing_coverage(source: str) -> bool:
+    """True when the source imports ``typing`` or ``pathlib`` directly."""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return False
+    for node in ast.iter_child_nodes(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name in ("typing", "pathlib"):
+                    return True
+        elif isinstance(node, ast.ImportFrom):
+            if node.module in ("typing", "pathlib"):
+                return True
+    return False
+
+
+def _needs_type_hint_fallback(source: str) -> bool:
+    """True when the source uses common type-hint patterns without coverage."""
+    if not _TYPE_HINT_RE.search(source):
+        return False
+    return not _has_typing_coverage(source)
+
+
+def _inject_type_hint_fallbacks(source: str) -> str:
+    """Return *source* with typing/pathlib fallback imports if needed.
+
+    Fallbacks are placed directly below any ``__future__`` imports so the
+    generated module compiles even when the parent source's typing imports were
+    not carried over.
+    """
+    if not _needs_type_hint_fallback(source):
+        return source
+
+    typing_present = _TYPE_HINT_FALLBACK_TYPING in source
+    pathlib_present = _TYPE_HINT_FALLBACK_PATHLIB in source
+    if typing_present and pathlib_present:
+        return source
+
+    lines = source.splitlines(keepends=True)
+    insert_pos = 0
+    seen_future = False
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("from __future__"):
+            insert_pos = i + 1
+            seen_future = True
+        elif seen_future and stripped == "":
+            insert_pos = i + 1
+        elif seen_future:
+            break
+
+    if not seen_future:
+        # No __future__ header: place fallback after the leading docstring/comments.
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            if (
+                stripped.startswith("#")
+                or stripped == ""
+                or stripped.startswith('"""')
+                or stripped.startswith("'''")
+            ):
+                insert_pos = i + 1
+            else:
+                break
+
+    additions: List[str] = []
+    if not typing_present:
+        additions.append(_TYPE_HINT_FALLBACK_TYPING + "\n")
+    if not pathlib_present:
+        additions.append(_TYPE_HINT_FALLBACK_PATHLIB + "\n")
+    if not additions:
+        return source
+
+    additions.append("\n")
+    for line in reversed(additions):
+        lines.insert(insert_pos, line)
+
+    return "".join(lines)
 
 
 class DecompositionError(ValueError):
@@ -581,7 +670,7 @@ class ModularDecomposer:
             filename=target,
             classes=classes,
             functions=functions,
-            source="\n".join(parts),
+            source=_inject_type_hint_fallbacks("\n".join(parts)),
             cross_imports=list(cross_lines),
         )
 
@@ -669,7 +758,7 @@ class ModularDecomposer:
             out.append(line)
         if not inserted:
             out.append(import_block)
-        return "".join(out)
+        return _inject_type_hint_fallbacks("".join(out))
 
     @staticmethod
     def _import_anchor_line(tree: ast.Module, total_lines: int) -> int:

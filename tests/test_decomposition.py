@@ -762,5 +762,64 @@ class TestFutureHoistingSplitter(_Tmp):
             self.assertEqual(text.count("from __future__ import annotations"), 1)
 
 
+
+# ---------------------------------------------------------------------------
+# Feature D — type-hint blanket fallback layer
+# ---------------------------------------------------------------------------
+
+
+class TestTypeHintFallbackSplitter(_Tmp):
+    """decompose_source injects typing/pathlib fallbacks when type hints are uncovered."""
+
+    def _split(self, source):
+        from src.decomposition.splitter import decompose_source
+
+        src = self.tmp / "mono.py"
+        src.write_text(source, encoding="utf-8")
+        out = self.tmp / "split"
+        result = decompose_source(src, out, min_lines=1)
+        self.assertEqual(result.errors, [])
+        return [Path(p) for p in result.files_written]
+
+    def test_fallback_injected_for_uncovered_annotations(self):
+        source = (
+            "from __future__ import annotations\n\n"
+            "def helper(p: Path) -> Optional[int]:\n"
+            "    return None\n"
+        )
+        for path in self._split(source):
+            text = path.read_text()
+            self.assertIn("from typing import Optional, Union, Any, List, Dict, Callable, Iterator", text)
+            self.assertIn("from pathlib import Path", text)
+            self.assertLess(text.index("from __future__"), text.index("from typing"))
+            self.assertLess(text.index("from typing"), text.index("""Auto-decomposed"""))
+
+
+class TestTypeHintFallbackScaffold(_Tmp):
+    """ModularDecomposer injects typing/pathlib fallbacks when type hints are uncovered."""
+
+    def _decompose(self, source):
+        dest = self.tmp / "dist"
+        ModularDecomposer(verbose=False).decompose(
+            source,
+            {"helpers": ["helper"]},
+            source_filename="main.py",
+            dest_dir=dest,
+        )
+        return dest
+
+    def test_fallback_injected_for_uncovered_annotations(self):
+        source = (
+            "from __future__ import annotations\n\n"
+            "def helper(p: Path) -> Optional[int]:\n"
+            "    return None\n"
+        )
+        dest = self._decompose(source)
+        text = (dest / "helpers.py").read_text()
+        self.assertIn("from typing import Optional, Union, Any, List, Dict, Callable, Iterator", text)
+        self.assertIn("from pathlib import Path", text)
+        self.assertLess(text.index("from __future__"), text.index("from typing"))
+
+
 if __name__ == "__main__":
     unittest.main()
