@@ -143,6 +143,15 @@ class TestModularDecomposer(_Tmp):
             main_src.index("from .parser import"),
         )
 
+    def test_orchestrator_hoists_future_above_docstring(self):
+        """Future imports are hoisted above the preserved module docstring."""
+        dest, _ = self._decompose({"parser": ["SchemaValidator"]})
+        main_src = (dest / "main.py").read_text()
+        self.assertLess(
+            main_src.index("from __future__"),
+            main_src.index("A monolithic script to be decomposed."),
+        )
+
     def test_all_generated_files_are_syntactically_valid(self):
         import ast as _ast
 
