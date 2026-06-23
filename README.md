@@ -1,165 +1,185 @@
-# AeroNova
+# Aero Nova
 
-**AeroNova** is an ultra‑scale, high‑performance polyglot build orchestration and automated code‑splitting engine. It parses, validates, and optimizes intricate, tightly coupled micro‑services and monolithic codebases, handling the heavy lifting of codebase restructuring, dependency reflux mapping, and resilience‑driven optimisation passes.
+Aero Nova is a deterministic, self-evolving, multi-agent build optimization and pipeline orchestration engine. Rather than executing static compile-and-link steps, Aero Nova models the build and compilation lifecycle as a **multi-objective optimization problem**. It employs static analysis, AST-level compaction, and an evolutionary tuner to discover Pareto-optimal configurations that balance execution speed, code size, and target accuracy.
 
----
-
-## Table of Contents
-
-- [Core Architecture](#core-architecture)
-- [Self‑Healing v2 Engine](#selfhealing-v2-engine)
-  - [1. Syntactic Lookahead Recovery](#1-syntactic-lookahead-recovery)
-  - [2. Stateful LSP Diagnostic Binding](#2-stateful-lsp-diagnostic-binding)
-  - [3. Sandboxed Staging & Verification Bounded Loop](#3-sandboxed-staging--verification-bounded-loop)
-- [Two‑Tiered Structural Merging](#twotiered-structural-merging)
-- [Configuration Setup](#configuration-setup)
-- [Usage Guide](#usage-guide)
-- [Pipeline Diagnostics Index](#pipeline-diagnostics-index)
-- [License](#license)
+While the **Aero Build Engine** serves as a static, non-evolving runtime extraction, **Aero Nova** represents the full, active super-system—integrating a multi-agent feedback loop (**the Cortex**) that dynamically mutates and evolves build parameters over successive runs.
 
 ---
 
-## Core Architecture
+## Key Architectural Pillars
 
-AeroNova decouples syntax from language quirks by processing source code through three interconnected layers:
+### 1. The Cortex (Multi-Agent Decider Loop)
 
-1. **Lossless Concrete Syntax Tree (CST)**  
-   Native source documents are ingested via Tree‑sitter parsers to establish immutable structural geometries, preserving formatting bounds, comments, and whitespace invariants.
+Unlike static build systems, Aero Nova uses a coordinated multi-agent runtime layer to monitor and direct optimizations:
 
-2. **1D Linearized UAST Array**  
-   The nested CST is flattened into a highly scannable, contiguous 1D Universal Abstract Syntax Tree array to maximise CPU cache locality during intense graph queries.
+* **Accuracy Guard:** Monitors code coverage metrics, test outputs, and compiler safety floors. It halts or rolls back mutations that drop below the user-defined `target_accuracy_floor`.
+* **Performance Profiler:** Measures micro-benchmarks and total wall-time across build cycles to quantify execution latencies.
+* **Compactor Agent:** Assesses code density and AST complexity, tuning AST compaction and minification depth.
 
-3. **Declarative Term Rewriting System (TRS)**  
-   Code transformations, structural partitioning, and module splitting are governed by an algebraic rewrite loop that matches pattern matrices to target code safely.
+### 2. Multi-Objective Optimization (NSGA-II)
 
----
+Aero Nova tracks and optimizes three conflicting physical objectives:
 
-## Self‑Healing v2 Engine
+1. **Accuracy (Reliability):** Code coverage validation and test suite assertions.
+2. **Speed (Execution Latency):** Minimizing compile-time and run-time execution paths.
+3. **Compression (Structural Density):** AST-level file size and overhead reduction.
 
-AeroNova features a resilient, multi‑step **Automated Program Repair (APR)** pipeline. Instead of failing the build when encountering syntax mutations or missing context frames, the compiler engages an active three‑tier recovery runtime:
+The system runs a Non-Dominated Sorting Genetic Algorithm (**NSGA-II**) across multiple generations to maintain a **Pareto Frontier** of build configurations, allowing developers to choose the optimal trade-off point for their specific production target.
+
+```text
+        ▲ [Speed] (Low execution time)
+        │
+        │      ● (Candidate A: Hyper-fast, minimal compaction)
+        │     ╱
+        │   ● (Candidate B: Balanced Pareto-optimal)
+        │╱
+        │● (Candidate C: Maximally compacted, slower build)
+        └────────────────────────────────────────► [Compression] (Reduced size)
 
 ```
-[Malformed Source Asset]
-         │
-         ▼
-[Syntactic Lookahead Recovery]  ◄── In‑Memory Patching
-         │
-         ▼
-[Sandboxed Staging Loop] (B=3)  ◄── TRS Reflux Injections
-         │
-         ▼
-[Atomic Sandbox Swap]           ◄── Stateful LSP Diagnostic Binder
-         │
-         ▼
-   (Promoted or Rolled Back)
-```
 
-### 1. Syntactic Lookahead Recovery
+### 3. AST-Level Compaction (Tree-sitter Engine)
 
-The front‑end scanner captures Tree‑sitter `ERROR` and `MISSING` nodes in real time. Rather than halting execution, it computes a local search context and dynamically injects temporary structural tokens (such as missing block colons, trailing statements, or unclosed scope braces) to reconstruct a pseudo‑valid CST stream in memory.
+Aero Nova integrates native tree-sitter parsers to safely parse and reconstruct syntax trees:
 
-### 2. Stateful LSP Diagnostic Binding
+* **Dead-Code Elimination (DCE):** Multi-pass recursive analysis to prune unreferenced variables, uncalled functions, and unreachable execution branches.
+* **Unused Import Removal:** Resolves and strips dangling namespace imports.
+* **Scope-Aware Minification:** Executes alpha-renaming on local variable bindings with collision-safe salting to ensure original runtime behavior remains unchanged.
 
-AeroNova hooks into background JSON‑RPC proxy sessions with active Language Servers (`pyright`, `rust‑analyzer`, `clangd`). Diagnostic errors are caught, parsed, and translated by the engine into deterministic TRS commands:
+### 4. Graph-Based Incremental Orchestration
 
-- `reportUndefinedVariable` → automatic lookup and binding of unresolved local symbol tokens.
-- `reportMissingImports` → generation of missing absolute module framework references.
-- `E0433` / `E0405` → direct lookup and injection of missing Rust trait scopes and usage declarations.
+The execution layer models tasks as a Directed Acyclic Graph (**DAG**):
 
-### 3. Sandboxed Staging & Verification Bounded Loop
-
-To ensure unverified modifications never pollute production files, all healing routines are isolated within a staging area located at `.aero/bootstrap_stage/`.
-
-Let **W** represent the production workspace directory and **S_w** ⊂ W the set of malformed files targeted for repair. The shadow staging directory is defined as **C = `.aero/bootstrap_stage/`**. For a target file *f* ∈ S_w, the isolation mapping **M** duplicates the original source file into the staging workspace:
-
-> Path(*f_c*) = C ∥ RelativePath(*f*)
-
-Let **V(*f_c*)** ∈ {0, 1} represent the compile‑time validation function. This function executes compilation scripts and returns `1` if the build succeeds without warnings or errors, and `0` otherwise. Let **ℛ** be the set of syntactic and semantic repair operations. Each repair iteration *i* applies a selected transformation R_i ∈ ℛ to the staged file:
-
-> *f_c*⁽ⁱ⁾ = R_i( *f_c*⁽ⁱ⁻¹⁾ )
-
-The containment loop operates within a strict execution budget **B** ∈ ℕ (capped at 3 retries). The transactional state machine follows this logic:
-
-```
-State(i) =
-  Swap(f_c⁽ⁱ⁾, f)                if V(f_c⁽ⁱ⁾) = 1
-  Loop(i+1)                      if V(f_c⁽ⁱ⁾) = 0 and i < B
-  Purge(f_c) ∧ Abort             if V(f_c⁽ⁱ⁾) = 0 and i = B
-```
-
-If validation fails on every attempt within the budget, the transaction is safely rolled back, the staging layout is purged, and a fallback status is logged without altering your code assets.
+* **Deterministic Scheduling:** Dependency trees are checked via a three-state Depth-First Search (DFS) coloring algorithm to intercept and report cyclic dependencies.
+* **Cryptographic Fingerprinting:** Monitored targets are hashed with SHA-256. If neither the source files nor their upstream dependency subtrees have mutated, the execution step short-circuits to cache.
 
 ---
 
-## Two‑Tiered Structural Merging
+## Pipeline Lifecycle
 
-To guarantee that automated machine mutations never discard human formatting choices or documentation layout comments, the generator leverages a two‑tier compaction alignment strategy:
+```text
+   blueprint.aero
+        │
+        ▼
+   ┌───────────┐       ┌────────────────┐       ┌─────────────────┐       ┌───────────┐
+   │  Scanner  │ ───►  │ Decision Tree  │ ───►  │ Parameter Tuner │ ───►  │ Compactor │
+   └───────────┘       └────────────────┘       └─────────────────┘       └───────────┘
+        ▲                                                │                      │
+        │                                                ▼                      │
+        │                                            [NSGA-II]                  ▼
+        └──────────────────────────────────────  Cortex Feedback ◄─────  Translator (.aeroc)
 
-- **Tier 1: Semantic Entity Alignment**  
-  Modifies structural fragments strictly by validating identity hashes (`Hash(Type ∥ Name ∥ Scope)`). Unchanged functions, classes, and variable signatures are left fully untouched, locking in original code style structures.
+```
 
-- **Tier 2: Parent‑Child‑Sibling (PCS) Trivia Alignment**  
-  Extracts layout comments and formatting markers (trivia) from the original file stream, relative‑positions them to local AST nodes, and re‑anchors them cleanly above the newly repaired target entities.
+1. **Scan:** Static parser evaluates directories, resolving file boundaries and calculating initial AST hashes.
+2. **Evaluate & Schedule:** Resolves the dependency DAG and schedules non-interdependent tasks across a dynamic worker thread pool.
+3. **Evolve & Tune:** The Cortex agent population evaluates target metrics against historical runs, generating parameter mutations.
+4. **Compact:** Tree-sitter transforms syntax trees based on the elected optimization profile.
+5. **Translate:** Emits optimized targets and serializes compilation actions into Aero recipe files (`.aeroc`).
 
 ---
 
-## Configuration Setup
+## Configuration (`blueprint.aero`)
 
-Build layouts are defined using a declarative blueprint configuration file named `blueprint.aero` at the root of your target workspace:
+Build targets and Cortex objectives are defined in a declarative manifest file, typically placed at the root of the workspace:
 
-```toml
-[system]
-name = "production-cluster-pipeline"
-strategy = "universal-engine"
-ephemeral_code = true
+```json
+{
+  "project": {
+    "name": "aero-nova-app",
+    "version": "1.0.0"
+  },
+  "cortex": {
+    "target_accuracy_floor": 0.9950,
+    "evolution_generations": 100,
+    "population_size": 25,
+    "mutation_rate": 0.15,
+    "agents": ["accuracy_guard", "performance_profiler", "ast_compactor"]
+  },
+  "targets": {
+    "shared_lib": {
+      "path": "src/core",
+      "language": "python",
+      "dependencies": [],
+      "compiler_flags": ["-O3"],
+      "opt_level": 2
+    },
+    "entrypoint": {
+      "path": "src/app",
+      "language": "python",
+      "dependencies": ["shared_lib"],
+      "compiler_flags": [],
+      "opt_level": 3
+    }
+  }
+}
 
-[context_registry]
-  [context_registry.core_application]
-  path = "./src/app_logic.py"
-  language = "python"
-  preserve_original_logic = false
-
-[scaling]
-  auto_split_threshold = 120       # Triggers splitting if node count token limits are breached
-  max_module_complexity = 12       # Forces structure decomposition rules on high branching metrics
-  hierarchy_depth = 4              # Determines directory tree nesting depth constraints
-
-[graph]
-dependencies = []
-boundaries = ["core_application"]
-targets = ["core_application"]
-
-[compiler]
-toolchain = "python3"
-optimization_level = "aggressive"
 ```
 
 ---
 
-## Usage Guide
+## Getting Started
 
-To execute a clean build and partition pass over an active target workspace, run the engine CLI interface:
+### Prerequisites
+
+* **Python:** Version 3.10 or higher.
+* **C++ Compiler:** *(Optional, required only if compiling tree-sitter language parsers from source)*.
+
+### Installation
+
+Clone the repository and install runtime dependencies:
 
 ```bash
-python main.py build --workspace /path/to/your/target_sandbox
+git clone https://github.com/sys1own/aero-nova.git
+cd aero-nova
+pip install -r requirements.txt
+
 ```
 
 ---
 
-## Pipeline Diagnostics Index
+## CLI Reference
 
-When a build run completes, check the generated metrics report for diagnostic status signals:
+Aero Nova exposes a clean command-line interface to orchestrate static compilations and evolutionary optimization loops:
 
-| Status Code             | Subsystem Meaning                                                                           | Safety Outcome                      |
-|-------------------------|---------------------------------------------------------------------------------------------|-------------------------------------|
-| `noop`                  | Target source contains 0 errors; no healing rules required.                                 | File left pristine.                 |
-| `promoted`              | Syntax or semantic errors discovered, completely fixed, and verified.                       | File atomically updated.            |
-| `rolled_back`           | Staged code modification attempts failed compilation check validation rules.                | Staging wiped; file unchanged.      |
-| `fallback_unrecoverable`| Severe parser syntax errors block tree construction even after lookahead repairs.           | Safe exit; file unchanged.          |
+### Run Build
+
+Executes the build pipeline based on the current Pareto-frontier or default configurations:
+
+```bash
+python main.py run --blueprint blueprint.aero
+
+```
+
+### Optimize Hyperparameters
+
+Launches a multi-agent evolutionary tuning sequence to find more optimal compiler parameters:
+
+```bash
+python main.py tune --generations 50 --pop-size 20
+
+```
+
+### Inspect Pipeline Status
+
+Visualizes the resolved dependency graph, cache hits, and performance history:
+
+```bash
+python main.py status
+
+```
+
+### Evict Cache
+
+Cleans execution caches and temporary build artifacts:
+
+```bash
+python main.py clean
+
+```
 
 ---
 
 ## License
 
-AeroNova is open‑source software licensed under the [MIT License](LICENSE).
-```
+This project is licensed under the MIT License - see the [LICENSE](https://www.google.com/search?q=LICENSE) file for details.
