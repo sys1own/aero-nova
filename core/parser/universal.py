@@ -113,7 +113,7 @@ def _load_language(language: str):
             f"Install it with: pip install {module_name.replace('_', '-')}"
         ) from exc
 
-    language_obj = Language(grammar.language())
+    language_obj = Language(grammar.language(), language)
     _LANGUAGE_CACHE[language] = language_obj
     return language_obj
 

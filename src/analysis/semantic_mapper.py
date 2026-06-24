@@ -121,7 +121,7 @@ class SemanticMapper:
         for lang, module_name in grammar_modules.items():
             try:
                 grammar = importlib.import_module(module_name)
-                parsers[lang] = Parser(Language(grammar.language()))
+                parsers[lang] = Parser(Language(grammar.language(), lang))
             except (ImportError, Exception) as exc:
                 logger.debug("tree-sitter grammar %r unavailable: %s", lang, exc)
                 continue
@@ -133,7 +133,7 @@ class SemanticMapper:
             import tree_sitter_rust
             from tree_sitter import Language, Parser
 
-            return Parser(Language(tree_sitter_rust.language()))
+            return Parser(Language(tree_sitter_rust.language(), "rust"))
         except ImportError:
             return None
 
