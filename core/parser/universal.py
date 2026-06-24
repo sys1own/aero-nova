@@ -68,8 +68,10 @@ def _load_language(language: str):
             _LANGUAGE_CACHE[language] = raw_lang
             return raw_lang
 
-        # Case C: a raw integer address; wrap it into a native PyCapsule pointer
-        # that the tree_sitter.Language constructor accepts.
+        # Case C: a raw integer address (tree-sitter 0.21.x vendor packages).
+        # Wrap it into a native PyCapsule pointer that the tree_sitter.Language
+        # constructor accepts. Single-argument fallbacks (TSLanguage(raw_lang))
+        # are invalid in this environment and are intentionally not attempted.
         if isinstance(raw_lang, int):
             ctypes.pythonapi.PyCapsule_New.restype = ctypes.py_object
             ctypes.pythonapi.PyCapsule_New.argtypes = [
@@ -83,10 +85,11 @@ def _load_language(language: str):
             _LANGUAGE_CACHE[language] = lang_obj
             return lang_obj
 
-        # Case D: standard two-argument constructor (string path / object).
-        lang_obj = TSLanguage(raw_lang, language)
-        _LANGUAGE_CACHE[language] = lang_obj
-        return lang_obj
+        # Strict validation: anything else is unexpected in this runtime.
+        raise UniversalParseError(
+            f"Unsupported grammar endpoint for {language!r}: "
+            f"grammar.language() returned {type(raw_lang).__name__}"
+        )
 
     except Exception as exc:
         raise UniversalParseError(
