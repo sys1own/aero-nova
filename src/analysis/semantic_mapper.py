@@ -33,6 +33,58 @@ import networkx as nx
 logger = logging.getLogger("analysis.semantic_mapper")
 
 
+# ---------------------------------------------------------------------------
+# Schema-tolerant node accessors
+# ---------------------------------------------------------------------------
+# The parsing layer can hand back either a native tree-sitter ``Node`` (with
+# ``.type``/``.children`` attributes) or a uniform dictionary record (from the
+# zero-dependency fallback engine, using ``node["type"]``/``node["children"]``).
+# These accessors normalise both shapes and degrade gracefully when a field is
+# missing or an unexpected type is encountered, so a single malformed node can
+# never cascade an exception up into the orchestration loops.
+
+def _ts_get(node: Any, key: str, default: Any) -> Any:
+    try:
+        if isinstance(node, dict):
+            value = node.get(key, default)
+        else:
+            value = getattr(node, key, default)
+    except Exception:
+        return default
+    return default if value is None else value
+
+
+def _node_type(node: Any) -> str:
+    return str(_ts_get(node, "type", "") or "")
+
+
+def _node_children(node: Any) -> List[Any]:
+    children = _ts_get(node, "children", [])
+    return list(children) if isinstance(children, (list, tuple)) else []
+
+
+def _node_start_byte(node: Any) -> int:
+    try:
+        return int(_ts_get(node, "start_byte", 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _node_end_byte(node: Any) -> int:
+    try:
+        return int(_ts_get(node, "end_byte", 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _node_start_point(node: Any) -> Tuple[int, int]:
+    point = _ts_get(node, "start_point", (0, 0))
+    try:
+        return int(point[0]), int(point[1])
+    except (TypeError, ValueError, IndexError, KeyError):
+        return 0, 0
+
+
 class UnifiedASTNode:
     """Represents a node in the Unified AST."""
 
@@ -395,12 +447,14 @@ class SemanticMapper:
 
     def _walk_ts_tree(self, node: Any, file_path: Path, source: str, language: str) -> None:
         node_id = self._generate_rust_node_id(file_path, node)
-        text = source[node.start_byte : node.end_byte]
+        start_byte, end_byte = _node_start_byte(node), _node_end_byte(node)
+        text = source[start_byte:end_byte] if 0 <= start_byte <= end_byte else ""
+        start_point = _node_start_point(node)
         uast_node = UnifiedASTNode(
             node_id=node_id,
-            node_type=node.type,
+            node_type=_node_type(node),
             language=language,
-            source_location=(str(file_path), node.start_point[0], node.start_point[1]),
+            source_location=(str(file_path), start_point[0], start_point[1]),
             data={"text": text if len(text) <= 4096 else text[:4096]},
         )
         uast_kind = self._classify_ts_node(node, language)
@@ -409,7 +463,7 @@ class SemanticMapper:
             uast_node.metadata["name"] = self._ts_node_name(node, source, language)
         self.uast.add_node(node_id, **uast_node.to_dict())
 
-        for child in node.children:
+        for child in _node_children(node):
             child_id = self._generate_rust_node_id(file_path, child)
             self.uast.add_edge(node_id, child_id, edge_type="ast_child")
             self._walk_ts_tree(child, file_path, source, language)
@@ -454,7 +508,7 @@ class SemanticMapper:
 
     def _classify_ts_node(self, node: Any, language: str) -> Optional[str]:
         kind_map = self._TS_KIND_MAP.get(language, {})
-        ntype = node.type
+        ntype = _node_type(node)
         if ntype in kind_map:
             # C/C++ top-level ``declaration`` nodes become globals only when they
             # are not function declarators (handled via dedicated node types).
@@ -468,8 +522,8 @@ class SemanticMapper:
 
     @staticmethod
     def _declaration_is_function(node: Any) -> bool:
-        for child in node.children:
-            if child.type == "function_declarator":
+        for child in _node_children(node):
+            if _node_type(child) == "function_declarator":
                 return True
         return False
 
@@ -478,20 +532,21 @@ class SemanticMapper:
         """Best-effort extraction of the identifier a node defines or calls."""
 
         def text_of(n: Any) -> str:
-            return source[n.start_byte : n.end_byte]
+            start, end = _node_start_byte(n), _node_end_byte(n)
+            return source[start:end] if 0 <= start <= end else ""
 
         def find_first(n: Any, types: Tuple[str, ...], max_depth: int = 3) -> Optional[Any]:
             stack = [(n, 0)]
             while stack:
                 cur, depth = stack.pop()
-                if cur is not node and cur.type in types:
+                if cur is not node and _node_type(cur) in types:
                     return cur
                 if depth < max_depth:
-                    for child in cur.children:
+                    for child in _node_children(cur):
                         stack.append((child, depth + 1))
             return None
 
-        ntype = node.type
+        ntype = _node_type(node)
         if language == "rust":
             ident = find_first(node, ("identifier", "type_identifier", "field_identifier"))
             return text_of(ident) if ident else ""
@@ -848,5 +903,6 @@ class SemanticMapper:
 
     @staticmethod
     def _generate_rust_node_id(file_path: Path, node: Any) -> str:
-        raw = f"{file_path}:{node.start_point[0]}:{node.start_point[1]}:{node.type}"
+        point = _node_start_point(node)
+        raw = f"{file_path}:{point[0]}:{point[1]}:{_node_type(node)}"
         return hashlib.md5(raw.encode()).hexdigest()[:16]

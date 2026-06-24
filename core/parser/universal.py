@@ -5,6 +5,8 @@ Implementation: Absolute, Multi-Era Self-Healing Grammar Loader
 """
 import os
 import sys
+import re
+import ast
 import ctypes
 import logging
 import importlib
@@ -453,3 +455,373 @@ def parse_file(path: Union[str, Path], language: Optional[str] = None) -> Dict[s
 
 def semantic_hash(source: str, language: str) -> str:
     return parse_source(source, language)["semantic_hash"]
+
+
+# ---------------------------------------------------------------------------
+# Autonomous Self-Healing AST Parsing Layer
+# ---------------------------------------------------------------------------
+# A standalone, schema-erasure engine that resolves PyCapsule/ctypes struct
+# offset drift between tree-sitter ABI 14 (0.21.x) and ABI 15 (0.22+/0.25.x),
+# and falls back to zero-dependency parsers (stdlib ``ast`` for Python; a regex
+# block-scope token flattener for everything else) when native parsing trips.
+#
+# This is an ADDITIONAL backend. The top-level UAST endpoints above
+# (parse_bytes/parse_source/parse_file) intentionally keep their existing UAST
+# schema and are NOT routed through this engine, so every downstream consumer
+# (extract_symbols, semantic_hash, the registry ingest, the semantic mapper,
+# the structural merger, etc.) keeps working unchanged. Use
+# ``get_self_healing_parser()`` to obtain the recovery engine explicitly.
+
+_engine_logger = logging.getLogger("AeroNova.Parser.SelfHealing")
+if not _engine_logger.handlers:
+    _engine_logger.addHandler(logging.NullHandler())
+
+HAS_TREE_SITTER = False
+try:
+    import tree_sitter as _ts_runtime
+    from tree_sitter import Parser as _TSParser, Language as _TSLanguageCls
+    HAS_TREE_SITTER = True
+except ImportError:
+    _TSParser = None
+    _TSLanguageCls = None
+    _engine_logger.warning("Native tree-sitter bindings not detected in current runtime environment.")
+
+
+class SelfHealingParser:
+    """
+    An autonomous parser wrapper that validates language struct layouts,
+    extracts FFI pointers safely, and provides robust fallback parsers for
+    continuous operation during binary/ABI conflicts.
+    """
+
+    def __init__(self, languages: Optional[List[str]] = None):
+        # Default to the languages this project actually ships grammars for,
+        # so bootstrap does not emit spurious "broken grammar" telemetry.
+        self.languages = languages or list(GRAMMAR_MODULES.keys())
+        self.language_cache: Dict[str, Any] = {}
+        self.broken_languages: set = set()
+        self.active_parser: Optional[Any] = None
+        self._bootstrap_parsers()
+
+    def _bootstrap_parsers(self) -> None:
+        """Bootstraps available native grammars and validates their binary structures."""
+        if not HAS_TREE_SITTER:
+            return
+        for lang in self.languages:
+            try:
+                lang_obj = self._load_language_safely(lang)
+                if lang_obj and self._verify_language_behavioral(lang, lang_obj):
+                    self.language_cache[lang] = lang_obj
+                    _engine_logger.info("Successfully loaded and verified grammar for '%s'", lang)
+                else:
+                    self.broken_languages.add(lang)
+                    _engine_logger.error("Validation failed for native grammar '%s'. Flagged for fallback routing.", lang)
+            except Exception as e:
+                self.broken_languages.add(lang)
+                _engine_logger.error("Error bootstrapping native grammar '%s': %s. Enforcing fallback routing.", lang, e)
+
+    def _load_language_safely(self, lang_name: str) -> Optional[Any]:
+        """
+        Dynamically extracts and constructs the Language object, handling
+        differences between raw pointer and PyCapsule interfaces across versions.
+        Delegates to the era-agnostic loader matrix where possible, then falls
+        back to direct shared-library pointer wrapping.
+        """
+        try:
+            return load_language(lang_name)
+        except Exception as e:
+            _engine_logger.debug("Era-agnostic loader failed for '%s': %s. Attempting dynamic extraction.", lang_name, e)
+
+        lib_name = f"tree_sitter_{lang_name}"
+        search_paths = [os.getcwd(), "/usr/local/lib", "/usr/lib"]
+        if "VIRTUAL_ENV" in os.environ:
+            search_paths.append(os.path.join(os.environ["VIRTUAL_ENV"], "lib"))
+
+        shared_lib_path = None
+        for path in search_paths:
+            if not os.path.isdir(path):
+                continue
+            for root, _, files in os.walk(path):
+                for file in files:
+                    if lib_name in file and (file.endswith(".so") or file.endswith(".dll") or file.endswith(".dylib")):
+                        shared_lib_path = os.path.join(root, file)
+                        break
+                if shared_lib_path:
+                    break
+            if shared_lib_path:
+                break
+
+        if not shared_lib_path:
+            return None
+
+        try:
+            lib = ctypes.CDLL(shared_lib_path)
+            lang_func = getattr(lib, f"tree_sitter_{lang_name}")
+            lang_func.restype = ctypes.c_void_p
+            raw_pointer = lang_func()
+            if not raw_pointer:
+                return None
+            # Re-box through the canonical capsule matrix, then fall back to raw int.
+            instance = instantiate_era_compatible_language(int(raw_pointer), lang_name)
+            if instance is not None:
+                return instance
+            try:
+                return _TSLanguageCls(raw_pointer)
+            except Exception:
+                return None
+        except Exception as e:
+            _engine_logger.error("Dynamic shared library pointer wrapping failed for '%s': %s", lang_name, e)
+            return None
+
+    def _verify_language_behavioral(self, lang_name: str, language_obj: Any) -> bool:
+        """Execute a real, syntactically complex parse to isolate offset drift."""
+        try:
+            parser = _build_parser_from_language(language_obj)
+        except Exception as e:
+            _engine_logger.error("Parser initialization rejected grammar for '%s': %s", lang_name, e)
+            return False
+
+        test_inputs = {
+            "python": b"def _validate_run():\n    results = [True, 'test_val']\n    return results\n",
+            "rust": b"fn _validate_run() -> i32 {\n    let val = 42;\n    return val;\n}\n",
+            "javascript": b"function _validate_run() {\n    const val = 100;\n    return val;\n}\n",
+            "json": b"{\n    \"valid\": true,\n    \"nodes\": [1, 2, 3]\n}\n",
+            "sql": b"SELECT id, name FROM users\nWHERE status = 'active'\nORDER BY id DESC;\n",
+        }
+        test_bytes = test_inputs.get(lang_name, b"// Dynamic structure sanity array verification test\n")
+        try:
+            tree = parser.parse(test_bytes)
+            if not tree or not tree.root_node:
+                return False
+            if tree.root_node.child_count == 0 and len(test_bytes) > 10:
+                _engine_logger.warning("Empty parse tree during verification for '%s'. Offsets may be corrupt.", lang_name)
+                return False
+            return True
+        except Exception as parse_err:
+            _engine_logger.error("Structural alignment verification failed for '%s': %s", lang_name, parse_err)
+            return False
+
+    def parse(self, source: Union[str, bytes], language: str) -> Dict[str, Any]:
+        source_bytes = source if isinstance(source, bytes) else source.encode("utf-8")
+        source_str = source.decode("utf-8") if isinstance(source, bytes) else source
+
+        if HAS_TREE_SITTER and language in self.language_cache and language not in self.broken_languages:
+            try:
+                parser = _build_parser_from_language(self.language_cache[language])
+                tree = parser.parse(source_bytes)
+                if tree and tree.root_node:
+                    return self._serialize_tree_sitter_node(tree.root_node, source_bytes)
+            except Exception as e:
+                _engine_logger.error("Intercepted core exception '%s' during parsing of %s. Activating fallback parser.", e, language)
+                self.broken_languages.add(language)
+
+        return self._execute_fallback_parse(source_str, language)
+
+    def _serialize_tree_sitter_node(self, node: Any, source_bytes: bytes) -> Dict[str, Any]:
+        text_segment = source_bytes[node.start_byte:node.end_byte]
+        children_list = []
+        for i in range(node.child_count):
+            child = node.child(i)
+            if child:
+                children_list.append(self._serialize_tree_sitter_node(child, source_bytes))
+        return {
+            "type": str(node.type),
+            "text": text_segment.decode("utf-8", errors="replace"),
+            "start_byte": int(node.start_byte),
+            "end_byte": int(node.end_byte),
+            "start_point": (int(node.start_point[0]), int(node.start_point[1])),
+            "end_point": (int(node.end_point[0]), int(node.end_point[1])),
+            "children": children_list,
+        }
+
+    def _execute_fallback_parse(self, source: str, language: str) -> Dict[str, Any]:
+        if language == "python":
+            try:
+                return self._parse_with_python_ast(source)
+            except Exception as e:
+                _engine_logger.error("Python stdlib fallback failed: %s. Defaulting to lexical token flattener.", e)
+                return self._parse_with_lexical_flattener(source, "python")
+        return self._parse_with_lexical_flattener(source, language)
+
+    def _parse_with_python_ast(self, source: str) -> Dict[str, Any]:
+        parsed_tree = ast.parse(source)
+        source_lines = source.splitlines()
+
+        def get_byte_index(line_0_indexed: int, col: int) -> int:
+            if line_0_indexed < 0 or line_0_indexed >= len(source_lines):
+                return 0
+            accumulated = sum(len(line) + 1 for line in source_lines[:line_0_indexed])
+            return accumulated + col
+
+        def walk_ast_node(node: ast.AST) -> Dict[str, Any]:
+            node_type = type(node).__name__
+            start_line = getattr(node, "lineno", 1) - 1
+            start_col = getattr(node, "col_offset", 0)
+            end_line = getattr(node, "end_lineno", getattr(node, "lineno", 1)) - 1
+            end_col = getattr(node, "end_col_offset", getattr(node, "col_offset", 0))
+
+            start_byte = get_byte_index(start_line, start_col)
+            end_byte = get_byte_index(end_line, end_col)
+
+            node_text = ""
+            try:
+                if start_line == end_line:
+                    if start_line < len(source_lines):
+                        node_text = source_lines[start_line][start_col:end_col]
+                else:
+                    segments = []
+                    if start_line < len(source_lines):
+                        segments.append(source_lines[start_line][start_col:])
+                    for idx in range(start_line + 1, end_line):
+                        if idx < len(source_lines):
+                            segments.append(source_lines[idx])
+                    if end_line < len(source_lines):
+                        segments.append(source_lines[end_line][:end_col])
+                    node_text = "\n".join(segments)
+            except Exception:
+                pass
+
+            children_list = []
+            for _field, value in ast.iter_fields(node):
+                if isinstance(value, list):
+                    for child_item in value:
+                        if isinstance(child_item, ast.AST):
+                            children_list.append(walk_ast_node(child_item))
+                elif isinstance(value, ast.AST):
+                    children_list.append(walk_ast_node(value))
+
+            return {
+                "type": f"ast_{node_type}",
+                "text": node_text,
+                "start_byte": start_byte,
+                "end_byte": max(start_byte, end_byte),
+                "start_point": (max(0, start_line), max(0, start_col)),
+                "end_point": (max(0, end_line), max(0, end_col)),
+                "children": children_list,
+            }
+
+        return {
+            "type": "module",
+            "text": source,
+            "start_byte": 0,
+            "end_byte": len(source.encode("utf-8")),
+            "start_point": (0, 0),
+            "end_point": (max(0, len(source_lines) - 1), max(0, len(source_lines[-1]) if source_lines else 0)),
+            "children": [walk_ast_node(parsed_tree)],
+        }
+
+    def _parse_with_lexical_flattener(self, source: str, language: str) -> Dict[str, Any]:
+        source_lines = source.splitlines()
+        source_bytes = source.encode("utf-8")
+        total_len = len(source_bytes)
+
+        root: Dict[str, Any] = {
+            "type": "source_file" if language != "python" else "module",
+            "text": source, "start_byte": 0, "end_byte": total_len,
+            "start_point": (0, 0),
+            "end_point": (max(0, len(source_lines) - 1), max(0, len(source_lines[-1]) if source_lines else 0)),
+            "children": [],
+        }
+
+        comment_rx = re.compile(r"(\/\/.*|\/\*[\s\S]*?\*\/|#.*)")
+        string_rx = re.compile(r"(\"[^\"]*\"|'[^']*')")
+        word_rx = re.compile(r"([a-zA-Z_][a-zA-Z0-9_]*)")
+        brace_rx = re.compile(r"([{}()\[\];])")
+        combined_rx = re.compile(f"{comment_rx.pattern}|{string_rx.pattern}|{word_rx.pattern}|{brace_rx.pattern}")
+
+        current_char_offset = 0
+        active_block_stack: List[Dict[str, Any]] = [root]
+
+        for line_num, line_str in enumerate(source_lines):
+            line_bytes = line_str.encode("utf-8")
+            line_start_byte = current_char_offset
+
+            for match in combined_rx.finditer(line_str):
+                token_text = match.group(0)
+                match_start = match.start()
+                match_end = match.end()
+
+                token_start_byte = line_start_byte + len(line_str[:match_start].encode("utf-8"))
+                token_end_byte = line_start_byte + len(line_str[:match_end].encode("utf-8"))
+
+                node_type = "token"
+                if token_text in ["{", "(", "["]:
+                    node_type = "block_start"
+                elif token_text in ["}", ")", "]"]:
+                    node_type = "block_end"
+                elif token_text == ";":
+                    node_type = "delimiter"
+                elif token_text.startswith(("//", "/*", "#")):
+                    node_type = "comment"
+                elif token_text.startswith(("\"", "'")):
+                    node_type = "string"
+                else:
+                    if token_text in ["fn", "def", "function", "class", "struct", "impl", "let", "const", "var"]:
+                        node_type = "keyword"
+                    else:
+                        node_type = "identifier"
+
+                node: Dict[str, Any] = {
+                    "type": node_type, "text": token_text, "start_byte": token_start_byte, "end_byte": token_end_byte,
+                    "start_point": (line_num, match_start), "end_point": (line_num, match_end), "children": [],
+                }
+
+                if node_type == "block_start":
+                    container_node = {
+                        "type": "lexical_block", "text": token_text, "start_byte": token_start_byte, "end_byte": token_end_byte,
+                        "start_point": (line_num, match_start), "end_point": (line_num, match_end), "children": [node],
+                    }
+                    active_block_stack[-1]["children"].append(container_node)
+                    active_block_stack.append(container_node)
+                elif node_type == "block_end":
+                    active_block_stack[-1]["children"].append(node)
+                    if len(active_block_stack) > 1:
+                        closed_block = active_block_stack.pop()
+                        closed_block["end_byte"] = token_end_byte
+                        closed_block["end_point"] = (line_num, match_end)
+                        try:
+                            closed_block["text"] = source_bytes[closed_block["start_byte"]:token_end_byte].decode("utf-8")
+                        except Exception:
+                            pass
+                else:
+                    active_block_stack[-1]["children"].append(node)
+
+            current_char_offset += len(line_bytes) + 1
+
+        while len(active_block_stack) > 1:
+            unfinished = active_block_stack.pop()
+            unfinished["end_byte"] = total_len
+            unfinished["end_point"] = root["end_point"]
+            try:
+                unfinished["text"] = source_bytes[unfinished["start_byte"]:total_len].decode("utf-8")
+            except Exception:
+                pass
+
+        return root
+
+
+def _build_parser_from_language(language_obj: Any) -> Any:
+    """Construct a tree-sitter Parser bound to *language_obj* across binding eras."""
+    parser = _TSParser()
+    try:
+        if hasattr(parser, "set_language"):
+            parser.set_language(language_obj)
+        else:
+            parser.language = language_obj
+        return parser
+    except (TypeError, AttributeError):
+        # Newer bindings only accept the language via constructor.
+        return _TSParser(language_obj)
+
+
+_SELF_HEALING_ENGINE: Optional["SelfHealingParser"] = None
+
+
+def get_self_healing_parser(languages: Optional[List[str]] = None) -> "SelfHealingParser":
+    """Return a lazily-constructed, process-wide self-healing recovery engine."""
+    global _SELF_HEALING_ENGINE
+    if languages is not None:
+        return SelfHealingParser(languages)
+    if _SELF_HEALING_ENGINE is None:
+        _SELF_HEALING_ENGINE = SelfHealingParser()
+    return _SELF_HEALING_ENGINE

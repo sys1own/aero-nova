@@ -212,8 +212,17 @@ class InferenceEngine:
         from tree_sitter import Parser
 
         source = path.read_bytes()
-        parser = Parser(load_language(language))
-        tree = parser.parse(source)
+        # Build the native parser through the self-healing loader. Any failure
+        # (grammar load, ABI drift, parse crash) is normalised into a clean
+        # InferenceError so callers like analyze_paths() can skip the file
+        # instead of letting a low-level exception cascade up the pipeline.
+        try:
+            parser = Parser(load_language(language))
+            tree = parser.parse(source)
+        except Exception as exc:
+            raise InferenceError(f"Failed to parse {path} as {language!r}: {exc}") from exc
+        if tree is None or tree.root_node is None:
+            raise InferenceError(f"Parser returned no tree for {path} ({language!r})")
         return tree, source
 
     def analyze_file(self, path: _PathLike, language: Optional[str] = None) -> FileAnalysis:
