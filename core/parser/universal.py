@@ -149,8 +149,8 @@ def safe_load_ts_language(lang_obj, name_str=""):
             pass
     from tree_sitter import Language as TSLanguage
     if name_str:
-        return TSsafe_load_ts_language(lang_obj, name_str)
-    return TSsafe_load_ts_language(lang_obj)
+        return TSLanguage(lang_obj, name_str)
+    return TSLanguage(lang_obj)
 
 
     parser = Parser(_load_language(language))
