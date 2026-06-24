@@ -88,6 +88,26 @@ def detect_language(path: Union[str, Path]) -> Optional[str]:
     return LANGUAGE_BY_EXTENSION.get(Path(path).suffix.lower())
 
 
+def _tree_sitter_language(language: str, language_obj) -> Any:
+    """Return a usable Tree-sitter Language object.
+
+    Modern grammar packages already return a ``Language`` instance from their
+    ``language()`` function. Older packages return a raw function pointer or a
+    path to a compiled shared library, which must be wrapped with the
+    ``Language`` constructor. The constructor signature varies across bindings
+    releases (one or two arguments), so we first try the one-argument form and
+    fall back to the explicit ``(ptr, name)`` form only if needed.
+    """
+    from tree_sitter import Language
+
+    if isinstance(language_obj, Language):
+        return language_obj
+    try:
+        return Language(language_obj)
+    except TypeError:
+        return Language(language_obj, language)
+
+
 def _load_language(language: str):
     """Dynamically import and bind the Tree-sitter grammar for *language*."""
     if language in _LANGUAGE_CACHE:
@@ -113,7 +133,7 @@ def _load_language(language: str):
             f"Install it with: pip install {module_name.replace('_', '-')}"
         ) from exc
 
-    language_obj = Language(grammar.language(), language)
+    language_obj = _tree_sitter_language(language, grammar.language())
     _LANGUAGE_CACHE[language] = language_obj
     return language_obj
 

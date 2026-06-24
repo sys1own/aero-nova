@@ -106,7 +106,7 @@ class SemanticMapper:
         """
         parsers: Dict[str, Any] = {}
         try:
-            from tree_sitter import Language, Parser
+            from tree_sitter import Parser
         except ImportError:
             return parsers
 
@@ -118,10 +118,12 @@ class SemanticMapper:
         }
         import importlib
 
+        from core.parser.universal import _tree_sitter_language
+
         for lang, module_name in grammar_modules.items():
             try:
                 grammar = importlib.import_module(module_name)
-                parsers[lang] = Parser(Language(grammar.language(), lang))
+                parsers[lang] = Parser(_tree_sitter_language(lang, grammar.language()))
             except (ImportError, Exception) as exc:
                 logger.debug("tree-sitter grammar %r unavailable: %s", lang, exc)
                 continue
@@ -131,9 +133,10 @@ class SemanticMapper:
     def _init_rust_parser() -> Any:  # pragma: no cover - retained for compatibility
         try:
             import tree_sitter_rust
-            from tree_sitter import Language, Parser
+            from tree_sitter import Parser
+            from core.parser.universal import _tree_sitter_language
 
-            return Parser(Language(tree_sitter_rust.language(), "rust"))
+            return Parser(_tree_sitter_language("rust", tree_sitter_rust.language()))
         except ImportError:
             return None
 
