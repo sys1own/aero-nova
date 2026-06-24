@@ -17,7 +17,7 @@ AeroNova utilizes a coordinated multi-agent layer to observe, guide, and adapt a
 ### 2. Universal 1D UAST and Term Rewriting System (TRS)
 * **Concrete Syntax Representation:** Source documents are parsed via Tree-sitter into a lossless representation, preserving formatting, whitespace bounds, and developer trivia.
 * **Linearized 1D UAST Array:** Flattened from the nested syntax tree to maximize hardware cache alignment during heavy dependency analysis.
-* **Resilient Fallback Parsing Engine:** In virtual execution runtimes experiencing FFI binary or tree-sitter compilation discrepancies, the engine dynamically isolates crashes and maps source files into deterministic 1-D flat arrays via an abstract structural regex proxy. This ensures downstream semantic hashing and symbol processing complete successfully without memory violations or key faults.
+* **Declarative Rewriting Passes:** Manages function-level decomposition, structural splitting, and cross-boundary dependency reflux via an algebraic term rewriting system.
 
 ### 3. Self-Healing v2 Engine (Automated Program Repair)
 When a build target contains severe lexical faults, AeroNova engages an active, sandboxed program recovery pipeline rather than breaking the build toolchain:
@@ -25,22 +25,27 @@ When a build target contains severe lexical faults, AeroNova engages an active, 
 * **Stateful LSP Diagnostic Reflux:** Hooks into native JSON-RPC proxy sessions with active language servers (`rust-analyzer`, `pyright`, `clangd`) to capture explicit error codes and dynamically apply structural use declarations or missing imports.
 * **Verification Containment Loop:** Restricts healing iterations to a temporary shadow staging area (`.aero/bootstrap_stage/`) bounded by a strict 3-retry budget. Verified files are swapped into production cleanly via thread-safe atomic calls.
 
-### 4. Custom Feature Ingestion & Managed Target Routing
-To accommodate raw, multi-language system simulations and third-party algorithmic extensions without polluting core execution environments, AeroNova includes an open target-provisioning layout:
+### 4. Dynamic Feature Scaffolding & Operational In-Tree Merging
+To accommodate raw, multi-language extensions without polluting core runtime spaces, AeroNova includes an automated target-provisioning workspace engine:
 * **Gated Language Routing:** Inspects foreign entry boundaries at the syntax level to cleanly isolate compilation logic, executing specialized compilation layers exclusively when matching source patterns are confirmed.
-* **Heterogeneous Asset Binding:** Seamlessly bridges independent source monoliths—such as standalone Python simulation scripts and multi-threaded Rust backends—under a unified multi-objective Pareto evolution sweep.
+* **Macro-Aware AST Expansion:** Dynamically modifies downstream macro block structures, resolving structural namespace constraints, dependency declarations, and import scopes to fit local tool architectures.
 * **Active In-Process Merger:** Pipelines successful out-of-tree workspace binaries straight back into the live core application tree via thread-safe runtime hot-swapping.
 
 ---
 
 ## ⚙️ Configuration Setup (`blueprint.aero`)
 
-Build targets, compilation requirements, and context registries are explicitly defined using a block-format TOML manifest placed at the root of the workspace.
+The execution of the optimization pipeline is governed by a `blueprint.aero` manifest file placed at the root of your workspace. This file defines your target compilation sources, analytical boundaries, and compiler toolchains using strict TOML formatting.
 
-### ⚠️ Strict Formatting Constraints (Python 3.12 Compliance)
-When declaring inline arrays of tables under the `[graph]` block, **do not use JSON-style colons (`:`) as key-value separators**. The native parsing toolchain (`tomllib`) enforces standard TOML layout compliance; all dictionary properties must utilize explicit equals signs (`=`).
+### 🧱 Manifest Structural Breakdown
 
-### Example Integration Specification
+* **`[system]`**: Sets global pipeline strategies and defines whether optimized variants are treated as volatile execution paths.
+* **`[context_registry.<target_name>]`**: Explicitly registers target files for analysis, declaring their native language patterns and preservation settings.
+* **`[scaling]`**: Establishes the static analysis boundaries. Files exceeding these metrics automatically trigger structural fragmentation and module decomposition sweeps.
+* **`[graph]`**: Configures the compilation pipeline array. Inline tables defined here **must use standard TOML syntax (`=`)** instead of JSON colons (`:`) to ensure proper loading.
+* **`[compiler]`**: Sets target toolchain profiles and defines optimization aggression constraints.
+
+### Production Blueprint Example
 
 ```toml
 [system]
@@ -48,39 +53,36 @@ name = "production-scale-polyglot-pipeline"
 strategy = "universal-engine"
 ephemeral_code = true
 
+# 1. Register Build Targets
 [context_registry.core_application]
 path = "./src/app_logic.py"
 language = "python"
 preserve_original_logic = false
 
+[context_registry.native_backend]
+path = "./src/lib.rs"
+language = "rust"
+preserve_original_logic = false
+
+# 2. Define Analytical Scaling Constraints
 [scaling]
-auto_split_threshold = 120       # Line count limits that trigger auto-decomposition
-max_module_complexity = 12       # Maximum McCabe complexity metric allowed per function scope
-hierarchy_depth = 4              # Package nesting constraints
+auto_split_threshold = 120       # Line limits per function scope triggering auto-decomposition
+max_module_complexity = 12       # Maximum McCabe cyclomatic complexity allowed before intervention
+hierarchy_depth = 4              # Maximum allowed package nesting depth
 
+# 3. Configure Output Graph (Note: Inline tables must use '=' assignment)
 [graph]
-# Valid TOML syntax using '=' for inline array properties
-targets = [{name = "core_orchestrator", source = "translator/core_orchestrator.py", output = "build_artifacts/core_orchestrator.optimized.py"}, {name = "anyon_extension", source = "translator/anyon_extension.py", output = "build_artifacts/anyon_extension.optimized.py"}]
+targets = [
+    { name = "core_application", source = "translator/core_orchestrator.py", output = "build_artifacts/core_orchestrator.optimized.py" },
+    { name = "native_backend", source = "translator/anyon_extension.py", output = "build_artifacts/anyon_extension.optimized.py" }
+]
 dependencies = []
-boundaries = ["core_orchestrator"]
+boundaries = ["core_application"]
 
+# 4. Bind Compiler Parameters
 [compiler]
 toolchain = "python3"
 optimization_level = "aggressive"
-
-# ==============================================================================
-# CUSTOM ADDITIONS: MANAGED EXTENSION CHANNELS
-# ==============================================================================
-
-[qg_orchestrator]
-path = "/content/qg_orchestrator.py"
-language = "python"
-opt_level = "strict"
-
-[sim_backend]
-path = "/content/lib.rs"
-language = "rust"
-opt_level = "max_performance"
 
 ```
 
@@ -88,11 +90,11 @@ opt_level = "max_performance"
 
 ## 🛠️ CLI Reference Manual
 
-AeroNova exposes a comprehensive systems command-line interface to orchestrate static builds, dependency graph visualizations, and automated repair cycles. All main execution sweeps require an explicit subcommand verb flag.
+AeroNova exposes a comprehensive systems command-line interface to orchestrate static builds, dependency graph visualizations, and automated repair cycles. All core pipeline invocations require an explicit subcommand verb flag.
 
 ### Run Pipeline Build
 
-Executes the full compiler pipeline, analyzing dependency graphs, evaluating caches, running parameter tuning, and executing code-generation cycles:
+Executes the full optimization loop, analyzing dependency graphs, evaluating caches, running multi-objective parameter sweeps, and executing code-generation cycles:
 
 ```bash
 python main.py build
@@ -159,3 +161,7 @@ python main.py cache clear
 ## 📄 License
 
 This framework is open-source software distributed under the terms of the MIT License.
+
+```
+
+```
