@@ -99,46 +99,37 @@ class SemanticMapper:
 
     @staticmethod
     def _init_tree_sitter_parsers() -> Dict[str, Any]:
-        """Build a tree-sitter ``Parser`` for every grammar that is installed.
-
-        Missing grammars are skipped gracefully so the engine still runs when a
-        given language pack is unavailable (e.g. Fortran on a minimal install).
-        """
         parsers: Dict[str, Any] = {}
         try:
             from tree_sitter import Parser
         except ImportError:
             return parsers
 
-        grammar_modules = {
-            "rust": "tree_sitter_rust",
-            "c": "tree_sitter_c",
-            "cpp": "tree_sitter_cpp",
-            "fortran": "tree_sitter_fortran",
-        }
-        import importlib
-
-        from core.parser.universal import _tree_sitter_language
-
-        for lang, module_name in grammar_modules.items():
+        grammar_modules = ["rust", "c", "cpp", "fortran"]
+        for lang in grammar_modules:
             try:
-                grammar = importlib.import_module(module_name)
-                parsers[lang] = Parser(_tree_sitter_language(lang, grammar.language()))
-            except (ImportError, Exception) as exc:
-                logger.debug("tree-sitter grammar %r unavailable: %s", lang, exc)
-                continue
+                import tree_sitter_languages
+                parsers[lang] = Parser(tree_sitter_languages.get_language(lang))
+            except Exception:
+                try:
+                    from core.parser.universal import _load_language
+                    parsers[lang] = Parser(_load_language(lang))
+                except Exception:
+                    continue
         return parsers
 
     @staticmethod
-    def _init_rust_parser() -> Any:  # pragma: no cover - retained for compatibility
+    def _init_rust_parser() -> Any:
         try:
-            import tree_sitter_rust
             from tree_sitter import Parser
-            from core.parser.universal import _tree_sitter_language
-
-            return Parser(_tree_sitter_language("rust", tree_sitter_rust.language()))
-        except ImportError:
-            return None
+            import tree_sitter_languages
+            return Parser(tree_sitter_languages.get_language("rust"))
+        except Exception:
+            try:
+                from core.parser.universal import _load_language
+                return Parser(_load_language("rust"))
+            except Exception:
+                return None
 
     # ------------------------------------------------------------------
     # Public API

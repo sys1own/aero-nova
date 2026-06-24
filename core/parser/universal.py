@@ -1,35 +1,3 @@
-"""Language-agnostic source ingestion engine for AeroNova.
-
-This module is the single, unified parsing layer for *every* supported language.
-It replaces the previous per-language parsing paths (stdlib ``ast`` for Python, a
-Rust-specific tree-sitter helper, etc.) with one Tree-sitter execution layer.
-
-Pipeline overview
-------------------
-1. **Dynamic grammar loading** -- grammars are resolved from a data-driven
-   extension table and lazily imported/bound at runtime.  Adding a language is a
-   table entry, never an ``if/else`` branch.
-2. **Lossless CST** -- Tree-sitter yields a Concrete Syntax Tree that keeps every
-   token: keywords, punctuation, literals, and comments.
-3. **Four-layer UAST normalisation** (the transform ``Psi: T_L -> U``):
-      * a *metadata* block (hashes, byte spans, node volume, parser flags),
-      * a *flat node array* (1-D, each node carries id / parent / children /
-        absolute spans / grammar token string),
-      * a *taxonomy* category per node (DECLARATION / STATEMENT / EXPRESSION ...),
-      * a *cross-language canonical kind* (e.g. Python ``def``, Rust ``pub fn``
-        and C++ ``int foo()`` all align to ``function_declaration``).
-4. **Deterministic semantic hashing** -- SHA-256 over the structural nodes only,
-   with comment / whitespace tokens filtered out.
-5. **Edge-case resilience** -- ``(ERROR)`` / ``(MISSING)`` nodes become symbolic
-   placeholders (with offsets recorded) while the rest of the tree is preserved;
-   files over 1 MB or parses exceeding 5 s are bypassed with a fallback flag.
-
-The emitted UAST is a plain ``dict`` (JSON/YAML serialisable) ready to be stored
-directly in the immutable context-registry database.
-"""
-
-from __future__ import annotations
-
 import hashlib
 import importlib
 import time
@@ -38,26 +6,19 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
-# ---------------------------------------------------------------------------
-# Limits / configuration
-# ---------------------------------------------------------------------------
-MAX_FILE_BYTES = 1_000_000  # 1 MB hard cap
+MAX_FILE_BYTES = 1_000_000
 PARSE_TIMEOUT_SECONDS = 5.0
 
-# ---------------------------------------------------------------------------
-# 1. Dynamic grammar loading (data-driven, no hardcoded parsing switches)
-# ---------------------------------------------------------------------------
-# extension -> canonical language name
 LANGUAGE_BY_EXTENSION: Dict[str, str] = {
     ".py": "python", ".pyi": "python",
     ".rs": "rust",
     ".cpp": "cpp", ".cc": "cpp", ".cxx": "cpp", ".hpp": "cpp", ".hh": "cpp", ".hxx": "cpp",
     ".c": "c", ".h": "c",
-    ".f": "fortran", ".f90": "fortran", ".f95": "fortran", ".f03": "fortran", ".for": "fortran",
+    ".f": "fortran", ".f90": "fortran", ".f95": "fortran", 
+    ".f03": "fortran", ".for": "fortran",
     ".cob": "cobol", ".cbl": "cobol", ".cpy": "cobol",
 }
 
-# canonical language name -> tree-sitter grammar python package
 GRAMMAR_MODULES: Dict[str, str] = {
     "python": "tree_sitter_python",
     "rust": "tree_sitter_rust",
@@ -67,75 +28,19 @@ GRAMMAR_MODULES: Dict[str, str] = {
     "cobol": "tree_sitter_cobol",
 }
 
-# Cached Tree-sitter Language objects, keyed by language name.
 _LANGUAGE_CACHE: Dict[str, Any] = {}
-
 
 class UniversalParseError(Exception):
     """Raised when no grammar can be resolved/loaded for a language."""
 
-
 def supported_extensions() -> List[str]:
     return sorted(LANGUAGE_BY_EXTENSION)
-
 
 def supported_languages() -> List[str]:
     return sorted(set(LANGUAGE_BY_EXTENSION.values()))
 
-
 def detect_language(path: Union[str, Path]) -> Optional[str]:
-    """Resolve a language name from a file extension (``None`` if unknown)."""
     return LANGUAGE_BY_EXTENSION.get(Path(path).suffix.lower())
-
-
-def _tree_sitter_language(language: str, language_obj) -> Any:
-    """Return a usable Tree-sitter Language object.
-
-    Modern grammar packages already return a fully formed ``Language`` instance
-    from their ``language()`` function. Older packages return a raw function
-    pointer or a path to a compiled shared library, which must be wrapped with
-    the ``safe_load_ts_language(ptr, name)`` constructor. We use a duck-typing gate to tell
-    the two apart without depending on the exact class identity.
-    """
-    from tree_sitter import Language
-
-    if type(language_obj).__name__ == "Language" or hasattr(language_obj, "query"):
-        return language_obj
-    return safe_load_ts_language(language_obj, language)
-
-
-def _load_language(language: str):
-    """Dynamically import and bind the Tree-sitter grammar for *language*."""
-    if language in _LANGUAGE_CACHE:
-        return _LANGUAGE_CACHE[language]
-
-    module_name = GRAMMAR_MODULES.get(language)
-    if module_name is None:
-        raise UniversalParseError(f"No grammar registered for language {language!r}")
-
-    try:
-        from tree_sitter import Language
-    except ImportError as exc:  # pragma: no cover - environment guard
-        raise UniversalParseError(
-            "The universal parser requires 'tree-sitter'. Install it with: "
-            "pip install tree-sitter"
-        ) from exc
-
-    try:
-        grammar = importlib.import_module(module_name)
-    except ImportError as exc:
-        raise UniversalParseError(
-            f"Grammar package {module_name!r} for {language!r} is not installed. "
-            f"Install it with: pip install {module_name.replace('_', '-')}"
-        ) from exc
-
-    language_obj = _tree_sitter_language(language, grammar.language())
-    _LANGUAGE_CACHE[language] = language_obj
-    return language_obj
-
-
-def _build_parser(language: str):
-    from tree_sitter import Parser
 
 def safe_load_ts_language(lang_obj, name_str=""):
     if type(lang_obj).__name__ == "Language" or hasattr(lang_obj, "query"):
@@ -143,23 +48,48 @@ def safe_load_ts_language(lang_obj, name_str=""):
     if callable(lang_obj) and not type(lang_obj).__name__ == "type":
         try:
             res = lang_obj()
-            if type(res).__name__ == "Language":
+            if type(res).__name__ == "Language" or hasattr(res, "query"):
                 return res
         except:
             pass
     from tree_sitter import Language as TSLanguage
-    if name_str:
-        return TSLanguage(lang_obj, name_str)
-    return TSLanguage(lang_obj)
+    try:
+        if name_str:
+            return TSLanguage(lang_obj, name_str)
+        return TSLanguage(lang_obj)
+    except Exception:
+        return lang_obj
+
+def _load_language(language: str):
+    if language in _LANGUAGE_CACHE:
+        return _LANGUAGE_CACHE[language]
+
+    # Master Provider: tree_sitter_languages gives flawless aligned bindings
+    try:
+        import tree_sitter_languages
+        lang_obj = tree_sitter_languages.get_language(language)
+        _LANGUAGE_CACHE[language] = lang_obj
+        return lang_obj
+    except Exception:
+        pass
+
+    module_name = GRAMMAR_MODULES.get(language)
+    if module_name is None:
+        raise UniversalParseError(f"No grammar registered for language {language!r}")
+
+    try:
+        grammar = importlib.import_module(module_name)
+        lang_obj = safe_load_ts_language(grammar.language(), language)
+        _LANGUAGE_CACHE[language] = lang_obj
+        return lang_obj
+    except Exception as exc:
+        raise UniversalParseError(f"Grammar package {module_name!r} failed: {exc}")
+
+def _build_parser(language: str):
+    from tree_sitter import Parser
+    return Parser(_load_language(language))
 
 
-    parser = Parser(_load_language(language))
-    return parser
-
-
-# ---------------------------------------------------------------------------
-# 3c. Node taxonomy + 3d. cross-language canonical alignment
-# ---------------------------------------------------------------------------
 class NodeCategory(str, Enum):
     DECLARATION = "DECLARATION"
     STATEMENT = "STATEMENT"
