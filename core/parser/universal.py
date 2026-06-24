@@ -50,35 +50,40 @@ def _load_language(language: str):
     if module_name is None:
         raise UniversalParseError(f"No grammar module registered for language {language!r}")
 
-    grammar = importlib.import_module(module_name)
-
-    # 1. Duck-typing: if the module root itself is already a Language instance.
-    if type(grammar).__name__ == "Language" or hasattr(grammar, "query"):
-        _LANGUAGE_CACHE[language] = grammar
-        return grammar
-
-    # 2. Extract the underlying grammar asset via the module's entry point.
-    if hasattr(grammar, "language"):
-        raw_lang = grammar.language()
-    else:
-        raise UniversalParseError(f"Grammar module {module_name} lacks language entry point.")
-
-    # 3. Duck-typing on the returned token.
-    if type(raw_lang).__name__ == "Language" or hasattr(raw_lang, "query"):
-        _LANGUAGE_CACHE[language] = raw_lang
-        return raw_lang
-
-    # 4. Resolve 0.21 constructor formats seamlessly.
+    from pathlib import Path
     from tree_sitter import Language as TSLanguage
-    try:
-        # Try the two-argument signature required by late 0.21 wheels.
-        lang_obj = TSLanguage(raw_lang, language)
-    except TypeError:
-        # Fall back to the single-argument signature for older 0.21 builds.
-        lang_obj = TSLanguage(raw_lang)
 
-    _LANGUAGE_CACHE[language] = lang_obj
-    return lang_obj
+    try:
+        grammar = importlib.import_module(module_name)
+
+        # 1. Dynamic path discovery: scan the package directory for the compiled
+        # extension library and load the grammar via its filesystem path string,
+        # which the 0.21 binding accepts natively without capsule conflicts.
+        package_dir = Path(grammar.__file__).parent
+        binary_files = (
+            list(package_dir.glob("*.so"))
+            + list(package_dir.glob("*.pyd"))
+            + list(package_dir.glob("*.dll"))
+        )
+
+        if binary_files:
+            lang_obj = TSLanguage(str(binary_files[0]), language)
+            _LANGUAGE_CACHE[language] = lang_obj
+            return lang_obj
+
+        # 2. Fallback: no binary on disk, extract the grammar pointer directly.
+        raw_lang = grammar.language()
+        if type(raw_lang).__name__ == "Language" or hasattr(raw_lang, "query"):
+            _LANGUAGE_CACHE[language] = raw_lang
+            return raw_lang
+
+        lang_obj = TSLanguage(raw_lang, language)
+        _LANGUAGE_CACHE[language] = lang_obj
+        return lang_obj
+    except Exception as exc:
+        raise UniversalParseError(
+            f"Failed to load grammar module {module_name}: {exc}"
+        ) from exc
 
 def _build_parser(language: str):
     from tree_sitter import Parser
