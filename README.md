@@ -156,30 +156,6 @@ python main.py cache clear
 
 ---
 
-## 💡 Core Troubleshooting & Stability Playbook
-
-### 1. Jupyter Magic Layer Constraints (`%%bash`)
-
-When executing automated compilation tracks inside notebook testing runtimes (such as Google Colab), the `%%bash` marker **must reside on the absolute first line of the cell block**. Mixing cell environment secrets extraction logic via Python *before* the magic flag will trigger severe syntax exceptions. Separate Python extraction passes and terminal commands into separate notebook blocks.
-
-### 2. Kinetic Stagnation Gate Interceptions (`TypeError`)
-
-The decision-tree state engine strictly enforces evaluation parameter bounds:
-
-```python
-def evaluate(metadata: Dict[str, Any], hyper_params: Dict[str, Any]) -> Dict[str, Any]:
-
-```
-
-When optimization parameters experience a kinetic speed stall (`velocity=0.00`), the engine trips safety recovery sequences to scale up mutation sigma factors. Any external invocation of the evaluation controller must provide an explicit dictionary parameter for hyperparameter overrides. If no specific tracking metrics are declared at the call site, an empty inline map placeholder (`{}`) must be supplied to preserve execution continuity:
-
-```python
-decision = decision_tree.evaluate(evaluation_context, {})
-
-```
-
----
-
 ## 📄 License
 
 This framework is open-source software distributed under the terms of the MIT License.
