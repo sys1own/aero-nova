@@ -16,8 +16,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 try:
-    import tree_sitter_rust as _tsr
-    from tree_sitter import Language, Parser
+    from core.parser.universal import _build_parser
+    from tree_sitter import Parser
 except ImportError as exc:  # pragma: no cover - environment guard
     raise ImportError(
         "translator.rust_ast requires 'tree-sitter' and 'tree-sitter-rust'. "
@@ -25,11 +25,8 @@ except ImportError as exc:  # pragma: no cover - environment guard
     ) from exc
 
 
-_RUST_LANGUAGE = Language(_tsr.language())
-
-
 def _parser() -> Parser:
-    return Parser(_RUST_LANGUAGE)
+    return _build_parser("rust")
 
 
 def parse(source: str):
