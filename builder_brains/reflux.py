@@ -97,9 +97,15 @@ class AeroDependencyRefluxEngine:
     def _python_header_offset(lines: List[str]) -> int:
         """Return the line index immediately following module docstrings/comments.
 
-        Skips a leading shebang, encoding/comment lines, blank lines, and a
-        module-level triple-quoted docstring so injected imports land in a
-        syntactically valid position.
+        Skips a leading shebang, encoding/comment lines, blank lines, a
+        module-level triple-quoted docstring, and any existing ``from
+        __future__ import ...`` statements, so injected imports always land
+        *after* the compiler-flag header instead of being sorted into place
+        after the fact. ``from __future__`` lines must occupy the absolute
+        beginning of the file (only comments, blank lines, the module
+        docstring, and other future statements may precede them) — inserting
+        a regular import above one is an unrecoverable ``SyntaxError``, so
+        this offset must never land before a future statement.
         """
         idx = 0
         n = len(lines)
@@ -128,6 +134,18 @@ class AeroDependencyRefluxEngine:
                         if idx < n:
                             idx += 1  # consume the closing-quote line
                     break
+
+        # Existing `from __future__ import ...` statements and the blank
+        # lines/comments interleaved with them. These compiler flags must
+        # stay pinned ahead of any newly injected import.
+        while idx < n:
+            stripped = lines[idx].strip()
+            if stripped.startswith("from __future__ import"):
+                idx += 1
+            elif stripped == "" or stripped.startswith("#"):
+                idx += 1
+            else:
+                break
 
         return idx
 
