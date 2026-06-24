@@ -303,7 +303,7 @@ class InferenceEngine:
         for module in sorted(dag):
             deps = dag[module]
             array = "[" + ", ".join(_toml_str(d) for d in deps) + "]"
-            lines.append(f\'"{_toml_key(module)}" = {array}\')
+            lines.append('"' + _toml_key(module) + '" = ' + array)
         block = "\n".join(lines) + "\n"
 
         if text and not text.endswith("\n"):

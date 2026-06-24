@@ -53,7 +53,13 @@ def _load_language(language: str):
     try:
         grammar = importlib.import_module(module_name)
         from tree_sitter import Language as TSLanguage
-        lang_obj = TSLanguage(grammar.language(), language)
+        raw = grammar.language()
+        # Some vendor wheels already return a ready-made Language instance;
+        # others return a raw PyCapsule/pointer that still needs wrapping.
+        if isinstance(raw, TSLanguage) or (hasattr(raw, "query") and hasattr(raw, "name")):
+            lang_obj = raw
+        else:
+            lang_obj = TSLanguage(raw, language)
     except Exception as exc:
         raise UniversalParseError(f"No valid grammar could be resolved for language {language!r}") from exc
 
@@ -62,7 +68,13 @@ def _load_language(language: str):
 
 def _build_parser(language: str):
     from tree_sitter import Parser
-    return Parser(_load_language(language))
+    lang_obj = _load_language(language)
+    parser = Parser()
+    try:
+        parser.language = lang_obj
+    except AttributeError:
+        parser.set_language(lang_obj)
+    return parser
 
 
 class NodeCategory(str, Enum):
