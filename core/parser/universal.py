@@ -47,28 +47,18 @@ def _load_language(language: str):
         return _LANGUAGE_CACHE[language]
 
     module_name = GRAMMAR_MODULES.get(language)
-    
-    # Priority 1: Modern Two-Argument Vendor Packages (Language(ptr, name))
-    if module_name:
-        try:
-            grammar = importlib.import_module(module_name)
-            from tree_sitter import Language as TSLanguage
-            lang_obj = TSLanguage(grammar.language(), language)
-            _LANGUAGE_CACHE[language] = lang_obj
-            return lang_obj
-        except Exception:
-            pass
+    if module_name is None:
+        raise UniversalParseError(f"No grammar module registered for language {language!r}")
 
-    # Priority 2: Fallback to tree_sitter_languages if vendor package is absent
     try:
-        import tree_sitter_languages
-        lang_obj = tree_sitter_languages.get_language(language)
-        _LANGUAGE_CACHE[language] = lang_obj
-        return lang_obj
-    except Exception:
-        pass
+        grammar = importlib.import_module(module_name)
+        from tree_sitter import Language as TSLanguage
+        lang_obj = TSLanguage(grammar.language(), language)
+    except Exception as exc:
+        raise UniversalParseError(f"No valid grammar could be resolved for language {language!r}") from exc
 
-    raise UniversalParseError(f"No valid grammar could be resolved for language {language!r}")
+    _LANGUAGE_CACHE[language] = lang_obj
+    return lang_obj
 
 def _build_parser(language: str):
     from tree_sitter import Parser
