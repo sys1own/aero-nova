@@ -138,11 +138,30 @@ class TestDAG(_WorkspaceCase):
         second = self._read("blueprint.aero")
         self.assertEqual(first.count("[dag]"), 1)
         self.assertEqual(second.count("[dag]"), 1)
-        # The blueprint stays valid TOML with the dag tracked.
+        # The blueprint stays valid TOML with the dag tracked.  Keys are
+        # sanitized to valid bare keys (path separators become underscores).
         from src.blueprint.loader import _toml as _t
         parsed = _t.loads(second)
         self.assertIn("dag", parsed)
-        self.assertEqual(parsed["dag"]["pkg/main.py"], ["pkg/util.py"])
+        self.assertEqual(parsed["dag"]["pkg_main_py"], ["pkg_util_py"])
+
+    def test_write_dag_sanitizes_special_keys(self):
+        bp = os.path.join(self.ws, "blueprint.aero")
+        self.engine.write_dag_to_blueprint(
+            bp,
+            {
+                "main__build_dsl_targets": ["src/core.cpp", "pkg/util.py"],
+                "weird\nname\t": ["a"],
+                "": ["b"],
+            },
+        )
+        text = self._read("blueprint.aero")
+        from src.blueprint.loader import _toml as _t
+        parsed = _t.loads(text)
+        self.assertIn("dag", parsed)
+        self.assertEqual(parsed["dag"]["main__build_dsl_targets"], ["src/core.cpp", "pkg/util.py"])
+        self.assertEqual(parsed["dag"]["weird_name"], ["a"])
+        self.assertEqual(parsed["dag"]["module"], ["b"])
 
 
 class TestDecomposition(_WorkspaceCase):

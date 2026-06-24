@@ -303,7 +303,7 @@ class InferenceEngine:
         for module in sorted(dag):
             deps = dag[module]
             array = "[" + ", ".join(_toml_str(d) for d in deps) + "]"
-            lines.append(f"{_toml_str(module)} = {array}")
+            lines.append(f"{_toml_key(module)} = {array}")
         block = "\n".join(lines) + "\n"
 
         if text and not text.endswith("\n"):
@@ -423,7 +423,65 @@ def decompose_file(
 # TOML helpers (deterministic, comment-preserving for untouched sections)
 # ---------------------------------------------------------------------------
 def _toml_str(value: str) -> str:
-    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    """Return a TOML-compatible double-quoted string for *value*."""
+    return (
+        '"'
+        + value.replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("\n", "\\n")
+        .replace("\r", "\\r")
+        .replace("\t", "\\t")
+        .replace("\x00", "\\x00")
+        .replace("\x01", "\\x01")
+        .replace("\x02", "\\x02")
+        .replace("\x03", "\\x03")
+        .replace("\x04", "\\x04")
+        .replace("\x05", "\\x05")
+        .replace("\x06", "\\x06")
+        .replace("\x07", "\\x07")
+        .replace("\x08", "\\b")
+        .replace("\x0b", "\\x0b")
+        .replace("\x0c", "\\x0c")
+        .replace("\x0e", "\\x0e")
+        .replace("\x0f", "\\x0f")
+        .replace("\x10", "\\x10")
+        .replace("\x11", "\\x11")
+        .replace("\x12", "\\x12")
+        .replace("\x13", "\\x13")
+        .replace("\x14", "\\x14")
+        .replace("\x15", "\\x15")
+        .replace("\x16", "\\x16")
+        .replace("\x17", "\\x17")
+        .replace("\x18", "\\x18")
+        .replace("\x19", "\\x19")
+        .replace("\x1a", "\\x1a")
+        .replace("\x1b", "\\x1b")
+        .replace("\x1c", "\\x1c")
+        .replace("\x1d", "\\x1d")
+        .replace("\x1e", "\\x1e")
+        .replace("\x1f", "\\x1f")
+        .replace("\x7f", "\\x7f")
+        + '"'
+    )
+
+
+def _toml_key(value: str) -> str:
+    """Return a TOML-compatible key for *value*.
+
+    Valid TOML bare keys may contain only ``A-Z``, ``a-z``, ``0-9``, ``_`` and
+    ``-``. Module names that come from file paths or decomposed identifiers can
+    carry path separators, dots, or other characters, so we sanitize them into a
+    safe bare key. Underscore runs are preserved (they are common in decomposed
+    module names such as ``main__build_dsl_targets``). If sanitization empties
+    the string, we fall back to a generic bare key so the document never has an
+    invalid key.
+    """
+    import re
+
+    safe = re.sub(r"[^A-Za-z0-9_-]", "_", value).strip("_")
+    if not safe:
+        return "module"
+    return safe
 
 
 def _strip_table(text: str, name: str) -> str:
