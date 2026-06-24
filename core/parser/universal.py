@@ -50,18 +50,22 @@ def _load_language(language: str):
     if module_name is None:
         raise UniversalParseError(f"No grammar module registered for language {language!r}")
 
+    grammar = importlib.import_module(module_name)
+    raw_lang = grammar.language()
+
+    # Case 1: the vendor wheel already hands back a fully formed Language.
+    if type(raw_lang).__name__ == "Language" or hasattr(raw_lang, "query"):
+        _LANGUAGE_CACHE[language] = raw_lang
+        return raw_lang
+
+    # Case 2: a raw pointer/capsule that still needs constructor wrapping.
+    from tree_sitter import Language as TSLanguage
     try:
-        grammar = importlib.import_module(module_name)
-        from tree_sitter import Language as TSLanguage
-        raw = grammar.language()
-        # Some vendor wheels already return a ready-made Language instance;
-        # others return a raw PyCapsule/pointer that still needs wrapping.
-        if isinstance(raw, TSLanguage) or (hasattr(raw, "query") and hasattr(raw, "name")):
-            lang_obj = raw
-        else:
-            lang_obj = TSLanguage(raw, language)
-    except Exception as exc:
-        raise UniversalParseError(f"No valid grammar could be resolved for language {language!r}") from exc
+        # Modern two-argument signature: Language(ptr, name).
+        lang_obj = TSLanguage(raw_lang, language)
+    except TypeError:
+        # Older one-argument signature: Language(ptr).
+        lang_obj = TSLanguage(raw_lang)
 
     _LANGUAGE_CACHE[language] = lang_obj
     return lang_obj
