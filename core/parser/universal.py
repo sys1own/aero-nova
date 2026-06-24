@@ -530,32 +530,111 @@ def _empty_uast(language: str, source: bytes, file_path: Optional[str], flags: D
     return {"metadata": {"language": language, "file_path": file_path, "file_hash": hashlib.sha256(source).hexdigest(), "source_bytes": len(source), "byte_span": [0, len(source)], "node_count": 0, "parser_flags": flags}, "root": None, "nodes": [], "semantic_hash": hashlib.sha256(b"").hexdigest()}
 
 def parse_bytes(source: bytes, language: str, *, file_path: Optional[str] = None) -> Dict[str, Any]:
-    base_flags = {"fallback": False, "fallback_reason": None, "has_error": False, "error_nodes": 0, "missing_nodes": 0, "error_locations": [], "truncated": False, "parse_seconds": 0.0}
+    base_flags = {
+        "fallback": False,
+        "fallback_reason": None,
+        "has_error": False,
+        "error_nodes": 0,
+        "missing_nodes": 0,
+        "error_locations": [],
+        "truncated": False,
+        "parse_seconds": 0.0,
+    }
+
     if len(source) > MAX_FILE_BYTES:
         return _empty_uast(language, source, file_path, dict(base_flags, fallback=True, fallback_reason="file_too_large", truncated=True))
 
+    # Initialize the universal parser wrapper
     univ_parser = get_universal_parser(language)
+
+    # Try setting the timeout budget safely if available
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        try: univ_parser._raw_parser.timeout_micros = int(PARSE_TIMEOUT_SECONDS * 1_000_000)
-        except Exception: pass
+        try:
+            univ_parser._raw_parser.timeout_micros = int(PARSE_TIMEOUT_SECONDS * 1_000_000)
+        except Exception:
+            pass
 
     start = time.monotonic()
-    try: tree = univ_parser._raw_parser.parse(source)
+    try:
+        # Primary path: Attempt native parsing
+        tree = univ_parser._raw_parser.parse(source)
+        if tree is None or tree.root_node is None or (tree.root_node.child_count == 0 and len(source) > 10):
+            raise ValueError("Native parsing returned empty or corrupted tree structures.")
+
+        elapsed = time.monotonic() - start
+        nodes, counts = _flatten(tree.root_node, language, source)
+
+        err_locs = [
+            {
+                "node_id": n["id"],
+                "kind": "missing" if n["is_missing"] else "error",
+                "start_byte": n["start_byte"],
+                "end_byte": n["end_byte"],
+                "start_point": n["start_point"],
+            }
+            for n in nodes if n["is_error"] or n["is_missing"]
+        ]
+
+        flags = dict(
+            base_flags,
+            has_error=bool(tree.root_node.has_error),
+            error_nodes=counts["error"],
+            missing_nodes=counts["missing"],
+            error_locations=err_locs,
+            parse_seconds=round(elapsed, 4),
+        )
+
+        uast = {
+            "metadata": {
+                "language": language,
+                "file_path": file_path,
+                "file_hash": hashlib.sha256(source).hexdigest(),
+                "source_bytes": len(source),
+                "byte_span": [tree.root_node.start_byte, tree.root_node.end_byte],
+                "node_count": len(nodes),
+                "parser_flags": flags,
+            },
+            "root": 0 if nodes else None,
+            "nodes": nodes,
+        }
+        uast["semantic_hash"] = semantic_hash_from_nodes(nodes)
+        return uast
+
     except Exception as exc:
-        return _fallback_uast(language, source, file_path, base_flags, f"parse_exception:{exc}")
-    elapsed = time.monotonic() - start
+        # Recovery path: Intercept the native failure and activate our fallback flattener
+        logger.warning(f"Native core exception captured: {exc}. Engaging schema-compliant fallback flattener.")
+        elapsed = time.monotonic() - start
 
-    if tree is None or elapsed > PARSE_TIMEOUT_SECONDS:
-        return _fallback_uast(language, source, file_path, base_flags, "parse_timeout", truncated=True, elapsed=elapsed)
+        source_str = source.decode("utf-8", errors="replace")
+        # Run the fallback parser (returns a nested dict tree)
+        fallback_tree = _execute_fallback_parse(source_str, language)
 
-    nodes, counts = _flatten(tree.root_node, language, source)
-    err_locs = [{"node_id": n["id"], "kind": "missing" if n["is_missing"] else "error", "start_byte": n["start_byte"], "end_byte": n["end_byte"], "start_point": n["start_point"]} for n in nodes if n["is_error"] or n["is_missing"]]
+        # Flatten the nested tree into the standard 1-D UAST array database
+        nodes = _flatten_fallback_tree(fallback_tree, language)
 
-    flags = dict(base_flags, has_error=bool(tree.root_node.has_error), error_nodes=counts["error"], missing_nodes=counts["missing"], error_locations=err_locs, parse_seconds=round(elapsed, 4))
-    uast = {"metadata": {"language": language, "file_path": file_path, "file_hash": hashlib.sha256(source).hexdigest(), "source_bytes": len(source), "byte_span": [tree.root_node.start_byte, tree.root_node.end_node.end_byte if hasattr(tree.root_node, 'end_node') else tree.root_node.end_byte], "node_count": len(nodes), "parser_flags": flags}, "root": 0 if nodes else None, "nodes": nodes}
-    uast["semantic_hash"] = semantic_hash_from_nodes(nodes)
-    return uast
+        flags = dict(
+            base_flags,
+            fallback=True,
+            fallback_reason=f"native_exception_routed_to_fallback:{type(exc).__name__}",
+            parse_seconds=round(elapsed, 4),
+        )
+
+        uast = {
+            "metadata": {
+                "language": language,
+                "file_path": file_path,
+                "file_hash": hashlib.sha256(source).hexdigest(),
+                "source_bytes": len(source),
+                "byte_span": [0, len(source)],
+                "node_count": len(nodes),
+                "parser_flags": flags,
+            },
+            "root": 0 if nodes else None,
+            "nodes": nodes,
+        }
+        uast["semantic_hash"] = semantic_hash_from_nodes(nodes)
+        return uast
 
 def parse_source(source: str, language: str, *, file_path: Optional[str] = None) -> Dict[str, Any]:
     return parse_bytes(source.encode("utf-8"), language, file_path=file_path)
