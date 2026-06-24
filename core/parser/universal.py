@@ -328,6 +328,12 @@ _COMMENT_TYPES = {"comment", "line_comment", "block_comment", "doc_comment"}
 def detect_language(path: Union[str, Path]) -> Optional[str]:
     return LANGUAGE_BY_EXTENSION.get(Path(path).suffix.lower())
 
+def supported_extensions() -> List[str]:
+    return sorted(LANGUAGE_BY_EXTENSION)
+
+def supported_languages() -> List[str]:
+    return sorted(set(LANGUAGE_BY_EXTENSION.values()))
+
 def _categorize(language: str, node_type: str, named: bool, is_error: bool, is_missing: bool) -> NodeCategory:
     if is_error or is_missing or node_type == "ERROR": return NodeCategory.ERROR
     if node_type in _COMMENT_TYPES: return NodeCategory.COMMENT
