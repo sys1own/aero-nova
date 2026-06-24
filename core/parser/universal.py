@@ -50,34 +50,26 @@ def _load_language(language: str):
     if module_name is None:
         raise UniversalParseError(f"No grammar module registered for language {language!r}")
 
-    grammar = importlib.import_module(module_name)
-    raw_lang = grammar.language()
+    from tree_sitter import Language as TSLanguage
 
-    # Empirical verification gate: rather than inferring the object's type from
-    # its class name, we test whether it binds natively to a parser. A fully
-    # formed Language binds cleanly via either the ``.language`` property setter
-    # or the classic ``.set_language()`` method; a raw capsule/pointer fails both
-    # and must be wrapped with the two-argument constructor Language(ptr, name).
-    from tree_sitter import Parser
-    test_parser = Parser()
-
-    # Test Phase A: property assignment (modern bindings).
     try:
-        test_parser.language = raw_lang
-        _LANGUAGE_CACHE[language] = raw_lang
-        return raw_lang
-    except (TypeError, AttributeError):
-        # Test Phase B: method setter (legacy bindings).
-        try:
-            test_parser.set_language(raw_lang)
-            _LANGUAGE_CACHE[language] = raw_lang
-            return raw_lang
-        except (TypeError, AttributeError):
-            # Case C: a raw pointer/capsule that still needs construction.
-            from tree_sitter import Language as TSLanguage
-            lang_obj = TSLanguage(raw_lang, language)
-            _LANGUAGE_CACHE[language] = lang_obj
-            return lang_obj
+        grammar = importlib.import_module(module_name)
+
+        # If the vendor entrypoint is already a fully formed Language instance,
+        # use it directly without any pointer extraction.
+        if isinstance(grammar, TSLanguage) or hasattr(grammar, "query"):
+            _LANGUAGE_CACHE[language] = grammar
+            return grammar
+
+        # Modern py-tree-sitter (0.22+/0.23+) module-level instantiation: hand
+        # the imported grammar module straight to the two-argument constructor.
+        lang_obj = TSLanguage(grammar, language)
+        _LANGUAGE_CACHE[language] = lang_obj
+        return lang_obj
+    except Exception as exc:
+        raise UniversalParseError(
+            f"Failed to load grammar module {module_name}: {exc}"
+        ) from exc
 
 def _build_parser(language: str):
     from tree_sitter import Parser
