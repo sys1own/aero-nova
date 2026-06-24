@@ -55,24 +55,38 @@ def _load_language(language: str):
 
     # Empirical verification gate: rather than inferring the object's type from
     # its class name, we test whether it binds natively to a parser. A fully
-    # formed Language assigns cleanly; a raw capsule/pointer raises TypeError and
-    # must be wrapped with the modern two-argument constructor Language(ptr, name).
+    # formed Language binds cleanly via either the ``.language`` property setter
+    # or the classic ``.set_language()`` method; a raw capsule/pointer fails both
+    # and must be wrapped with the two-argument constructor Language(ptr, name).
     from tree_sitter import Parser
     test_parser = Parser()
+
+    # Test Phase A: property assignment (modern bindings).
     try:
         test_parser.language = raw_lang
         _LANGUAGE_CACHE[language] = raw_lang
         return raw_lang
-    except TypeError:
-        from tree_sitter import Language as TSLanguage
-        lang_obj = TSLanguage(raw_lang, language)
-        _LANGUAGE_CACHE[language] = lang_obj
-        return lang_obj
+    except (TypeError, AttributeError):
+        # Test Phase B: method setter (legacy bindings).
+        try:
+            test_parser.set_language(raw_lang)
+            _LANGUAGE_CACHE[language] = raw_lang
+            return raw_lang
+        except (TypeError, AttributeError):
+            # Case C: a raw pointer/capsule that still needs construction.
+            from tree_sitter import Language as TSLanguage
+            lang_obj = TSLanguage(raw_lang, language)
+            _LANGUAGE_CACHE[language] = lang_obj
+            return lang_obj
 
 def _build_parser(language: str):
     from tree_sitter import Parser
     parser = Parser()
-    parser.language = _load_language(language)
+    lang = _load_language(language)
+    try:
+        parser.language = lang
+    except (TypeError, AttributeError):
+        parser.set_language(lang)
     return parser
 
 
