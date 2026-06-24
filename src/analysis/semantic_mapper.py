@@ -99,23 +99,26 @@ class SemanticMapper:
 
     @staticmethod
     def _init_tree_sitter_parsers() -> Dict[str, Any]:
-        from core.parser.universal import _build_parser, UniversalParseError
+        from core.parser.universal import _build_parser
 
         parsers: Dict[str, Any] = {}
         for lang in ("rust", "c", "cpp", "fortran"):
             try:
                 parsers[lang] = _build_parser(lang)
-            except UniversalParseError:
+            except Exception:
+                # A missing/unbuildable grammar should degrade gracefully so the
+                # remaining languages still load; the factory is the single
+                # source of truth, we just skip whatever it can't resolve.
                 continue
         return parsers
 
     @staticmethod
     def _init_rust_parser() -> Any:
-        from core.parser.universal import _build_parser, UniversalParseError
+        from core.parser.universal import _build_parser
 
         try:
             return _build_parser("rust")
-        except UniversalParseError:
+        except Exception:
             return None
 
     # ------------------------------------------------------------------

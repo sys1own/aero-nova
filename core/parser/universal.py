@@ -53,28 +53,26 @@ def _load_language(language: str):
     grammar = importlib.import_module(module_name)
     raw_lang = grammar.language()
 
-    # Case 1: the vendor wheel already hands back a fully formed Language.
-    if type(raw_lang).__name__ == "Language" or hasattr(raw_lang, "query"):
+    # Empirical verification gate: rather than inferring the object's type from
+    # its class name, we test whether it binds natively to a parser. A fully
+    # formed Language assigns cleanly; a raw capsule/pointer raises TypeError and
+    # must be wrapped with the modern two-argument constructor Language(ptr, name).
+    from tree_sitter import Parser
+    test_parser = Parser()
+    try:
+        test_parser.language = raw_lang
         _LANGUAGE_CACHE[language] = raw_lang
         return raw_lang
-
-    # Case 2: a raw pointer/capsule that still needs constructor wrapping.
-    # tree-sitter 0.21+ mandates the two-argument signature Language(ptr, name);
-    # we never fall back to the deprecated single-argument form.
-    from tree_sitter import Language as TSLanguage
-    lang_obj = TSLanguage(raw_lang, language)
-
-    _LANGUAGE_CACHE[language] = lang_obj
-    return lang_obj
+    except TypeError:
+        from tree_sitter import Language as TSLanguage
+        lang_obj = TSLanguage(raw_lang, language)
+        _LANGUAGE_CACHE[language] = lang_obj
+        return lang_obj
 
 def _build_parser(language: str):
     from tree_sitter import Parser
-    lang_obj = _load_language(language)
     parser = Parser()
-    try:
-        parser.language = lang_obj
-    except AttributeError:
-        parser.set_language(lang_obj)
+    parser.language = _load_language(language)
     return parser
 
 
