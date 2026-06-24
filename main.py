@@ -1287,6 +1287,34 @@ def heal_command(args: argparse.Namespace) -> int:
         build_fn = make_rust_build_fn()
     elif language in ("c", "cpp"):
         build_fn = make_c_build_fn("cc" if language == "c" else "c++")
+    elif language == "python":
+        from core.toolchain.self_healing import Diagnostic
+        import ast
+        def make_python_build_fn():
+            def build(path: Path) -> list:
+                try:
+                    ast.parse(path.read_text(encoding="utf-8", errors="ignore"), filename=str(path))
+                    return []
+                except SyntaxError as e:
+                    return [Diagnostic(
+                        message=e.msg, 
+                        file=str(path), 
+                        line=e.lineno or 1, 
+                        column=e.offset or 1, 
+                        severity="error", 
+                        source="compiler"
+                    )]
+                except Exception as e:
+                    return [Diagnostic(
+                        message=str(e), 
+                        file=str(path), 
+                        line=1, 
+                        column=1, 
+                        severity="error", 
+                        source="compiler"
+                    )]
+            return build
+        build_fn = make_python_build_fn()
     else:
         print(f"heal: no compiler build driver for language {language!r}", file=sys.stderr)
         return 1
