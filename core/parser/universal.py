@@ -392,6 +392,119 @@ def semantic_hash_from_nodes(nodes: List[Dict[str, Any]]) -> str:
     tokens = [n.get("canonical_kind") or n["type"] for n in nodes if n["category"] not in ("COMMENT", "PUNCTUATION") and n["named"]]
     return hashlib.sha256("\n".join(tokens).encode("utf-8")).hexdigest()
 
+
+def _flatten_fallback_tree(fallback_root_node: Dict[str, Any], language: str) -> List[Dict[str, Any]]:
+    """Flatten a nested fallback tree dictionary into the standard 1-D UAST node list."""
+    flat_nodes: List[Dict[str, Any]] = []
+
+    def walk(current_dict_node: Dict[str, Any], parent_id: Optional[int] = None) -> int:
+        node_id = len(flat_nodes)
+        node_type = current_dict_node.get("type", "unknown")
+        is_error = bool(current_dict_node.get("is_error", False))
+        is_missing = bool(current_dict_node.get("is_missing", False))
+        named = bool(current_dict_node.get("named", True))
+
+        record = {
+            "id": node_id,
+            "parent": parent_id,
+            "children": [],
+            "type": node_type,
+            "grammar": current_dict_node.get("grammar", node_type),
+            "category": _categorize(language, node_type, named, is_error, is_missing).value,
+            "canonical_kind": current_dict_node.get("canonical_kind") or CANONICAL_KIND.get(language, {}).get(node_type),
+            "named": named,
+            "start_byte": current_dict_node.get("start_byte", 0),
+            "end_byte": current_dict_node.get("end_byte", 0),
+            "start_point": list(current_dict_node.get("start_point", [0, 0])),
+            "end_point": list(current_dict_node.get("end_point", [0, 0])),
+            "is_error": is_error,
+            "is_missing": is_missing,
+        }
+        if is_error or is_missing:
+            record["canonical_kind"] = "missing_placeholder" if is_missing else "error_placeholder"
+        if "text" in current_dict_node and not current_dict_node.get("children"):
+            record["text"] = current_dict_node["text"]
+
+        flat_nodes.append(record)
+        for child_dict in current_dict_node.get("children", []):
+            child_id = walk(child_dict, node_id)
+            record["children"].append(child_id)
+        return node_id
+
+    walk(fallback_root_node, None)
+    return flat_nodes
+
+
+def _execute_fallback_parse(source: str, language: str) -> Dict[str, Any]:
+    """Execute the self-healing fallback parser without bootstrapping native grammars."""
+    engine = SelfHealingParser([])
+    return engine._execute_fallback_parse(source, language)
+
+
+def _fallback_uast(
+    source: bytes,
+    language: str,
+    file_path: Optional[str],
+    base_flags: Dict[str, Any],
+    reason: str,
+    *,
+    truncated: bool = False,
+    elapsed: float = 0.0,
+) -> Dict[str, Any]:
+    """Return a populated UAST by running the fallback parser and flattening its tree."""
+    flags: Dict[str, Any] = dict(
+        base_flags,
+        fallback=True,
+        fallback_reason=reason,
+        truncated=truncated,
+        parse_seconds=round(elapsed, 4),
+    )
+    source_str = source.decode("utf-8", "replace")
+    try:
+        fallback_root = _execute_fallback_parse(source_str, language)
+        nodes = _flatten_fallback_tree(fallback_root, language)
+    except Exception as exc:
+        return _empty_uast(
+            language,
+            source,
+            file_path,
+            dict(flags, fallback_reason=f"{reason};fallback_failure:{exc}"),
+        )
+
+    err_locs = [
+        {
+            "node_id": n["id"],
+            "kind": "missing" if n["is_missing"] else "error",
+            "start_byte": n["start_byte"],
+            "end_byte": n["end_byte"],
+            "start_point": n["start_point"],
+        }
+        for n in nodes
+        if n["is_error"] or n["is_missing"]
+    ]
+    flags = dict(
+        flags,
+        has_error=any(n["is_error"] or n["is_missing"] for n in nodes),
+        error_nodes=sum(1 for n in nodes if n["is_error"]),
+        missing_nodes=sum(1 for n in nodes if n["is_missing"]),
+        error_locations=err_locs,
+    )
+    uast = {
+        "metadata": {
+            "language": language,
+            "file_path": file_path,
+            "file_hash": hashlib.sha256(source).hexdigest(),
+            "source_bytes": len(source),
+            "byte_span": [0, len(source)],
+            "node_count": len(nodes),
+            "parser_flags": flags,
+        },
+        "root": 0 if nodes else None,
+        "nodes": nodes,
+    }
+    uast["semantic_hash"] = semantic_hash_from_nodes(nodes)
+    return uast
+
 def _node_name(node_id: int, nodes: List[Dict[str, Any]], source_text: str) -> Optional[str]:
     queue = list(nodes[node_id]["children"])
     while queue:
@@ -430,11 +543,11 @@ def parse_bytes(source: bytes, language: str, *, file_path: Optional[str] = None
     start = time.monotonic()
     try: tree = univ_parser._raw_parser.parse(source)
     except Exception as exc:
-        return _empty_uast(language, source, file_path, dict(base_flags, fallback=True, fallback_reason=f"parse_exception:{exc}"))
+        return _fallback_uast(language, source, file_path, base_flags, f"parse_exception:{exc}")
     elapsed = time.monotonic() - start
 
     if tree is None or elapsed > PARSE_TIMEOUT_SECONDS:
-        return _empty_uast(language, source, file_path, dict(base_flags, fallback=True, fallback_reason="parse_timeout", truncated=True, parse_seconds=round(elapsed, 4)))
+        return _fallback_uast(language, source, file_path, base_flags, "parse_timeout", truncated=True, elapsed=elapsed)
 
     nodes, counts = _flatten(tree.root_node, language, source)
     err_locs = [{"node_id": n["id"], "kind": "missing" if n["is_missing"] else "error", "start_byte": n["start_byte"], "end_byte": n["end_byte"], "start_point": n["start_point"]} for n in nodes if n["is_error"] or n["is_missing"]]

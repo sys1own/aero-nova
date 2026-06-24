@@ -7,6 +7,8 @@ from core.parser.universal import (
     MAX_FILE_BYTES,
     NodeCategory,
     UniversalParseError,
+    _fallback_uast,
+    _flatten_fallback_tree,
     detect_language,
     extract_symbols,
     parse_source,
@@ -165,6 +167,62 @@ class TestEdgeCases(unittest.TestCase):
         flags = uast["metadata"]["parser_flags"]
         self.assertFalse(flags["fallback"])
         self.assertFalse(flags["has_error"])
+
+
+class TestFallbackFlattening(unittest.TestCase):
+    def test_python_fallback_tree_is_flattened(self):
+        uast = _fallback_uast(
+            _PY.encode("utf-8"), "python", "m.py",
+            {"fallback": False, "fallback_reason": None, "has_error": False,
+             "error_nodes": 0, "missing_nodes": 0, "error_locations": [],
+             "truncated": False, "parse_seconds": 0.0},
+            "forced_fallback",
+        )
+        nodes = uast["nodes"]
+        self.assertGreater(len(nodes), 0)
+        self.assertEqual(uast["root"], 0)
+        self.assertEqual(nodes[0]["parent"], None)
+        for i, node in enumerate(nodes):
+            self.assertEqual(node["id"], i)
+            for child_id in node["children"]:
+                self.assertEqual(nodes[child_id]["parent"], i)
+        self.assertEqual(uast["metadata"]["node_count"], len(nodes))
+        self.assertTrue(uast["metadata"]["parser_flags"]["fallback"])
+
+    def test_lexical_fallback_tree_is_flattened(self):
+        rust_source = "fn main() { let x = 42; }\n"
+        uast = _fallback_uast(
+            rust_source.encode("utf-8"), "rust", "main.rs",
+            {"fallback": False, "fallback_reason": None, "has_error": False,
+             "error_nodes": 0, "missing_nodes": 0, "error_locations": [],
+             "truncated": False, "parse_seconds": 0.0},
+            "forced_fallback",
+        )
+        nodes = uast["nodes"]
+        self.assertGreater(len(nodes), 0)
+        self.assertEqual(uast["root"], 0)
+        # Leaf tokens carry text and parent pointers are consistent.
+        for i, node in enumerate(nodes):
+            self.assertEqual(node["id"], i)
+            for child_id in node["children"]:
+                self.assertEqual(nodes[child_id]["parent"], i)
+        leaf_texts = [n.get("text") for n in nodes if not n["children"]]
+        self.assertIn("main", leaf_texts)
+
+    def test_flattener_handles_missing_fields_gracefully(self):
+        tree = {
+            "type": "root",
+            "children": [
+                {"type": "child", "children": []},
+                {"type": "leaf", "text": "x"},
+            ],
+        }
+        nodes = _flatten_fallback_tree(tree, "python")
+        self.assertEqual(len(nodes), 3)
+        self.assertEqual(nodes[0]["children"], [1, 2])
+        self.assertEqual(nodes[1]["parent"], 0)
+        self.assertEqual(nodes[2]["parent"], 0)
+        self.assertEqual(nodes[2].get("text"), "x")
 
 
 if __name__ == "__main__":
