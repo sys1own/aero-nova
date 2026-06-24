@@ -59,13 +59,10 @@ def _load_language(language: str):
         return raw_lang
 
     # Case 2: a raw pointer/capsule that still needs constructor wrapping.
+    # tree-sitter 0.21+ mandates the two-argument signature Language(ptr, name);
+    # we never fall back to the deprecated single-argument form.
     from tree_sitter import Language as TSLanguage
-    try:
-        # Modern two-argument signature: Language(ptr, name).
-        lang_obj = TSLanguage(raw_lang, language)
-    except TypeError:
-        # Older one-argument signature: Language(ptr).
-        lang_obj = TSLanguage(raw_lang)
+    lang_obj = TSLanguage(raw_lang, language)
 
     _LANGUAGE_CACHE[language] = lang_obj
     return lang_obj
