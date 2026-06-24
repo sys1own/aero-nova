@@ -1,67 +1,28 @@
-# =============================================================================
-# AeroNova Production Blueprint
-# =============================================================================
-#
-# This is the canonical, production-ready blueprint for the aero-nova workspace.
-# It uses the modern block-DSL dialect to declare a polyglot project containing:
-#   - A Python web/data service target
-#   - A Rust high-performance compute target
-#   - Production scaling boundaries
-#
-# Validate with:  python main.py check --blueprint blueprint.aero
-# =============================================================================
+[system]
+name = "aero-nova-massive-evolution"
+strategy = "universal-engine"
+ephemeral_code = false
 
-# ---------------------------------------------------------------------------
-# Project Metadata
-# ---------------------------------------------------------------------------
-# Every blueprint must declare exactly one `project` block.  The name serves as
-# the canonical package identifier; version follows SemVer.
+[context_registry.core_orchestrator]
+path = "./main.py"
+language = "python"
+preserve_original_logic = true
 
-project "aero-nova" {
-    version     = "1.0.0"
-    description = "Polyglot self-healing code framework with declarative blueprints"
-    authors     = ["AeroNova Maintainers <maintainers@aero-nova.dev>"]
-}
+[context_registry.anyon_extension]
+path = "/content/lib.rs"
+language = "rust"
+preserve_original_logic = false
 
-# ---------------------------------------------------------------------------
-# Target: Python Web & Data Service
-# ---------------------------------------------------------------------------
-# The primary application layer — an async Python service exposing REST/gRPC
-# endpoints for the self-healing orchestrator and analytics pipelines.
+[scaling]
+auto_split_threshold = 90
+max_module_complexity = 9
+hierarchy_depth = 4
 
-target "web_service" {
-    language = "python"
-    sources  = ["src/**/*.py"]
-    requires = ["compute_engine"]
-    flags    = ["--strict", "--warn-unreachable"]
-}
+[graph]
+targets = [{"name": "core_orchestrator", "source": "translator/core_orchestrator.py", "output": "build_artifacts/core_orchestrator.optimized.py"}, {"name": "anyon_extension", "source": "translator/anyon_extension.py", "output": "build_artifacts/anyon_extension.optimized.py"}]
+dependencies = []
+boundaries = ["core_orchestrator"]
 
-# ---------------------------------------------------------------------------
-# Target: Rust Performance-Critical Engine
-# ---------------------------------------------------------------------------
-# The hot-path compute kernel — a compiled Rust library exposed to Python via
-# PyO3 FFI.  Handles AST diffing, structural hashing, and parallel tree walks
-# where Python's GIL would be a bottleneck.
-
-target "compute_engine" {
-    language = "rust"
-    sources  = ["native/**/*.rs"]
-    cargo_dependencies = ["pyo3=0.22", "rayon=1.10", "serde=1.0"]
-    flags    = ["--edition=2021", "-C", "opt-level=3"]
-}
-
-# ---------------------------------------------------------------------------
-# Scaling Boundaries
-# ---------------------------------------------------------------------------
-# Production thresholds that govern AeroNova's automatic module splitting and
-# complexity analysis.  These are intentionally conservative for real-world
-# codebases:
-#   - auto_split_threshold: maximum lines before a module is flagged for split
-#   - max_module_complexity: cyclomatic complexity ceiling per module
-#   - hierarchy_depth: maximum nesting depth for abstraction layers
-
-scaling "production" {
-    auto_split_threshold  = 500
-    max_module_complexity = 15
-    hierarchy_depth       = 3
-}
+[compiler]
+toolchain = "python3"
+optimization_level = "aggressive"

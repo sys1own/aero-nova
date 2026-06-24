@@ -94,14 +94,14 @@ def _tree_sitter_language(language: str, language_obj) -> Any:
     Modern grammar packages already return a fully formed ``Language`` instance
     from their ``language()`` function. Older packages return a raw function
     pointer or a path to a compiled shared library, which must be wrapped with
-    the ``Language(ptr, name)`` constructor. We use a duck-typing gate to tell
+    the ``safe_load_ts_language(ptr, name)`` constructor. We use a duck-typing gate to tell
     the two apart without depending on the exact class identity.
     """
     from tree_sitter import Language
 
     if type(language_obj).__name__ == "Language" or hasattr(language_obj, "query"):
         return language_obj
-    return Language(language_obj, language)
+    return safe_load_ts_language(language_obj, language)
 
 
 def _load_language(language: str):
@@ -136,6 +136,22 @@ def _load_language(language: str):
 
 def _build_parser(language: str):
     from tree_sitter import Parser
+
+def safe_load_ts_language(lang_obj, name_str=""):
+    if type(lang_obj).__name__ == "Language" or hasattr(lang_obj, "query"):
+        return lang_obj
+    if callable(lang_obj) and not type(lang_obj).__name__ == "type":
+        try:
+            res = lang_obj()
+            if type(res).__name__ == "Language":
+                return res
+        except:
+            pass
+    from tree_sitter import Language as TSLanguage
+    if name_str:
+        return TSsafe_load_ts_language(lang_obj, name_str)
+    return TSsafe_load_ts_language(lang_obj)
+
 
     parser = Parser(_load_language(language))
     return parser
