@@ -12,3 +12,11 @@ __pycache__/
 core/extensions/*.so
 core/extensions/*.dylib
 core/extensions/*.pyd
+
+# AeroNova Engine Transient Caches
+build_artifacts/
+.aero/
+native/
+WORKSPACE_AUDIT.md
+*.pyc
+__pycache__/
