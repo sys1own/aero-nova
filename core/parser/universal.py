@@ -157,48 +157,53 @@ def wrap_pointer_in_capsule(ptr: int, name: bytes = b"tree_sitter.Language") -> 
 
 def instantiate_era_compatible_language(target_ref: Any, name: str) -> Optional[Any]:
     _, _, lang_cls = _import_tree_sitter()
-    try:
-        lang_instance = lang_cls(target_ref)
-        if verify_language_behavioral(lang_instance):
-            return lang_instance
-    except Exception:
-        pass
+
+    # 1. Duck-Typing: If it is already a fully formed Language instance, test it
+    if type(target_ref).__name__ == "Language" or hasattr(target_ref, "query"):
+        if verify_language_behavioral(target_ref):
+            return target_ref
+
+    # 2. Extract raw C memory address regardless of incoming wrapper type
+    ptr = None
+    if isinstance(target_ref, int):
+        ptr = target_ref
+    elif target_ref is not None and (type(target_ref).__name__ == "PyCapsule" or "Capsule" in str(type(target_ref))):
+        ptr = extract_raw_pointer(target_ref)
+
+    if ptr is not None:
+        # Try direct integer injection if supported by the binding compilation
+        try:
+            lang_instance = lang_cls(ptr, name)
+            if verify_language_behavioral(lang_instance): return lang_instance
+        except Exception: pass
+        try:
+            lang_instance = lang_cls(ptr)
+            if verify_language_behavioral(lang_instance): return lang_instance
+        except Exception: pass
+
+        # Repackage the pointer into capsules matching every historical naming era
+        for capsule_name in [b"tree_sitter.Language", b"tree_sitter_language", name.encode("utf-8"), None]:
+            capsule = wrap_pointer_in_capsule(ptr, capsule_name)
+            if capsule is not None:
+                try:
+                    lang_instance = lang_cls(capsule, name)
+                    if verify_language_behavioral(lang_instance): return lang_instance
+                except Exception: pass
+                try:
+                    lang_instance = lang_cls(capsule)
+                    if verify_language_behavioral(lang_instance): return lang_instance
+                except Exception: pass
+
+    # 3. Direct Fallback Pass
     try:
         lang_instance = lang_cls(target_ref, name)
-        if verify_language_behavioral(lang_instance):
-            return lang_instance
-    except Exception:
-        pass
-    unboxed_ptr = extract_raw_pointer(target_ref)
-    if unboxed_ptr is not None:
-        try:
-            lang_instance = lang_cls(unboxed_ptr)
-            if verify_language_behavioral(lang_instance):
-                return lang_instance
-        except Exception:
-            pass
-        try:
-            lang_instance = lang_cls(unboxed_ptr, name)
-            if verify_language_behavioral(lang_instance):
-                return lang_instance
-        except Exception:
-            pass
-    if isinstance(target_ref, int):
-        capsule_name = b"tree_sitter.Language"
-        capsule_instance = wrap_pointer_in_capsule(target_ref, capsule_name)
-        if capsule_instance is not None:
-            try:
-                lang_instance = lang_cls(capsule_instance)
-                if verify_language_behavioral(lang_instance):
-                    return lang_instance
-            except Exception:
-                pass
-            try:
-                lang_instance = lang_cls(capsule_instance, name)
-                if verify_language_behavioral(lang_instance):
-                    return lang_instance
-            except Exception:
-                pass
+        if verify_language_behavioral(lang_instance): return lang_instance
+    except Exception: pass
+    try:
+        lang_instance = lang_cls(target_ref)
+        if verify_language_behavioral(lang_instance): return lang_instance
+    except Exception: pass
+
     return None
 
 def load_language(language_name: str, library_path: Optional[str] = None) -> Any:
