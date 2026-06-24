@@ -50,37 +50,80 @@ def _load_language(language: str):
     if module_name is None:
         raise UniversalParseError(f"No grammar module registered for language {language!r}")
 
+    import ctypes
     from pathlib import Path
     from tree_sitter import Language as TSLanguage
 
     try:
         grammar = importlib.import_module(module_name)
 
-        # 1. Dynamic path discovery: scan the package directory for the compiled
-        # extension library and load the grammar via its filesystem path string,
-        # which the 0.21 binding accepts natively without capsule conflicts.
-        package_dir = Path(grammar.__file__).parent
-        binary_files = (
-            list(package_dir.glob("*.so"))
-            + list(package_dir.glob("*.pyd"))
-            + list(package_dir.glob("*.dll"))
-        )
+        # 1. Duck-typing: if the module root itself is already a Language, reuse it.
+        if type(grammar).__name__ == "Language" or hasattr(grammar, "query"):
+            _LANGUAGE_CACHE[language] = grammar
+            return grammar
 
-        if binary_files:
-            lang_obj = TSLanguage(str(binary_files[0]), language)
-            _LANGUAGE_CACHE[language] = lang_obj
-            return lang_obj
+        if hasattr(grammar, "language"):
+            raw_lang = grammar.language()
+        else:
+            raise UniversalParseError(
+                f"Grammar module {module_name} lacks 'language' attribute."
+            )
 
-        # 2. Fallback: no binary on disk, extract the grammar pointer directly.
-        raw_lang = grammar.language()
         if type(raw_lang).__name__ == "Language" or hasattr(raw_lang, "query"):
             _LANGUAGE_CACHE[language] = raw_lang
             return raw_lang
 
-        lang_obj = TSLanguage(raw_lang, language)
-        _LANGUAGE_CACHE[language] = lang_obj
-        return lang_obj
+        # 2. Integer pointer conversion: 0.21.x wheels return a raw integer
+        # address from language(); wrap it into a native PyCapsule the
+        # tree_sitter.Language constructor accepts.
+        if isinstance(raw_lang, int):
+            ctypes.pythonapi.PyCapsule_New.restype = ctypes.py_object
+            ctypes.pythonapi.PyCapsule_New.argtypes = [
+                ctypes.c_void_p,
+                ctypes.c_char_p,
+                ctypes.c_void_p,
+            ]
+
+            last_err = None
+            # Different tree-sitter eras expect different capsule names.
+            for capsule_name in [None, b"tree_sitter_language", language.encode("utf-8")]:
+                try:
+                    capsule = ctypes.pythonapi.PyCapsule_New(raw_lang, capsule_name, None)
+                    lang_obj = TSLanguage(capsule, language)
+                    _LANGUAGE_CACHE[language] = lang_obj
+                    return lang_obj
+                except Exception as e:
+                    last_err = e
+                    continue
+            if last_err:
+                raise last_err
+
+        # 3. Fallback A: direct object instantiation.
+        try:
+            lang_obj = TSLanguage(raw_lang, language)
+            _LANGUAGE_CACHE[language] = lang_obj
+            return lang_obj
+        except TypeError:
+            lang_obj = TSLanguage(raw_lang)
+            _LANGUAGE_CACHE[language] = lang_obj
+            return lang_obj
+
     except Exception as exc:
+        # Fallback B: path-based binary discovery as an absolute last resort.
+        try:
+            package_dir = Path(grammar.__file__).parent
+            binary_files = (
+                list(package_dir.glob("*.so"))
+                + list(package_dir.glob("*.pyd"))
+                + list(package_dir.glob("*.dll"))
+            )
+            if binary_files:
+                lang_obj = TSLanguage(str(binary_files[0]), language)
+                _LANGUAGE_CACHE[language] = lang_obj
+                return lang_obj
+        except Exception:
+            pass
+
         raise UniversalParseError(
             f"Failed to load grammar module {module_name}: {exc}"
         ) from exc
