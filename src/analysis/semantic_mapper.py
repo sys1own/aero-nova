@@ -101,15 +101,22 @@ class SemanticMapper:
     def _init_tree_sitter_parsers() -> Dict[str, Any]:
         parsers: Dict[str, Any] = {}
         try:
-            from tree_sitter import Parser
+            from tree_sitter import Parser, Language as TSLanguage
         except ImportError:
             return parsers
 
-        grammar_modules = ["rust", "c", "cpp", "fortran"]
-        for lang in grammar_modules:
+        grammar_modules = {
+            "rust": "tree_sitter_rust",
+            "c": "tree_sitter_c",
+            "cpp": "tree_sitter_cpp",
+            "fortran": "tree_sitter_fortran",
+        }
+        import importlib
+
+        for lang, module_name in grammar_modules.items():
             try:
-                import tree_sitter_languages
-                parsers[lang] = Parser(tree_sitter_languages.get_language(lang))
+                grammar = importlib.import_module(module_name)
+                parsers[lang] = Parser(TSLanguage(grammar.language(), lang))
             except Exception:
                 try:
                     from core.parser.universal import _load_language
@@ -121,9 +128,9 @@ class SemanticMapper:
     @staticmethod
     def _init_rust_parser() -> Any:
         try:
-            from tree_sitter import Parser
-            import tree_sitter_languages
-            return Parser(tree_sitter_languages.get_language("rust"))
+            from tree_sitter import Parser, Language as TSLanguage
+            import tree_sitter_rust
+            return Parser(TSLanguage(tree_sitter_rust.language(), "rust"))
         except Exception:
             try:
                 from core.parser.universal import _load_language

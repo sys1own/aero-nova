@@ -42,29 +42,24 @@ def supported_languages() -> List[str]:
 def detect_language(path: Union[str, Path]) -> Optional[str]:
     return LANGUAGE_BY_EXTENSION.get(Path(path).suffix.lower())
 
-def safe_load_ts_language(lang_obj, name_str=""):
-    if type(lang_obj).__name__ == "Language" or hasattr(lang_obj, "query"):
-        return lang_obj
-    if callable(lang_obj) and not type(lang_obj).__name__ == "type":
-        try:
-            res = lang_obj()
-            if type(res).__name__ == "Language" or hasattr(res, "query"):
-                return res
-        except:
-            pass
-    from tree_sitter import Language as TSLanguage
-    try:
-        if name_str:
-            return TSLanguage(lang_obj, name_str)
-        return TSLanguage(lang_obj)
-    except Exception:
-        return lang_obj
-
 def _load_language(language: str):
     if language in _LANGUAGE_CACHE:
         return _LANGUAGE_CACHE[language]
 
-    # Master Provider: tree_sitter_languages gives flawless aligned bindings
+    module_name = GRAMMAR_MODULES.get(language)
+    
+    # Priority 1: Modern Two-Argument Vendor Packages (Language(ptr, name))
+    if module_name:
+        try:
+            grammar = importlib.import_module(module_name)
+            from tree_sitter import Language as TSLanguage
+            lang_obj = TSLanguage(grammar.language(), language)
+            _LANGUAGE_CACHE[language] = lang_obj
+            return lang_obj
+        except Exception:
+            pass
+
+    # Priority 2: Fallback to tree_sitter_languages if vendor package is absent
     try:
         import tree_sitter_languages
         lang_obj = tree_sitter_languages.get_language(language)
@@ -73,17 +68,7 @@ def _load_language(language: str):
     except Exception:
         pass
 
-    module_name = GRAMMAR_MODULES.get(language)
-    if module_name is None:
-        raise UniversalParseError(f"No grammar registered for language {language!r}")
-
-    try:
-        grammar = importlib.import_module(module_name)
-        lang_obj = safe_load_ts_language(grammar.language(), language)
-        _LANGUAGE_CACHE[language] = lang_obj
-        return lang_obj
-    except Exception as exc:
-        raise UniversalParseError(f"Grammar package {module_name!r} failed: {exc}")
+    raise UniversalParseError(f"No valid grammar could be resolved for language {language!r}")
 
 def _build_parser(language: str):
     from tree_sitter import Parser
