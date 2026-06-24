@@ -50,26 +50,35 @@ def _load_language(language: str):
     if module_name is None:
         raise UniversalParseError(f"No grammar module registered for language {language!r}")
 
+    grammar = importlib.import_module(module_name)
+
+    # 1. Duck-typing: if the module root itself is already a Language instance.
+    if type(grammar).__name__ == "Language" or hasattr(grammar, "query"):
+        _LANGUAGE_CACHE[language] = grammar
+        return grammar
+
+    # 2. Extract the underlying grammar asset via the module's entry point.
+    if hasattr(grammar, "language"):
+        raw_lang = grammar.language()
+    else:
+        raise UniversalParseError(f"Grammar module {module_name} lacks language entry point.")
+
+    # 3. Duck-typing on the returned token.
+    if type(raw_lang).__name__ == "Language" or hasattr(raw_lang, "query"):
+        _LANGUAGE_CACHE[language] = raw_lang
+        return raw_lang
+
+    # 4. Resolve 0.21 constructor formats seamlessly.
     from tree_sitter import Language as TSLanguage
-
     try:
-        grammar = importlib.import_module(module_name)
+        # Try the two-argument signature required by late 0.21 wheels.
+        lang_obj = TSLanguage(raw_lang, language)
+    except TypeError:
+        # Fall back to the single-argument signature for older 0.21 builds.
+        lang_obj = TSLanguage(raw_lang)
 
-        # If the vendor entrypoint is already a fully formed Language instance,
-        # use it directly without any pointer extraction.
-        if isinstance(grammar, TSLanguage) or hasattr(grammar, "query"):
-            _LANGUAGE_CACHE[language] = grammar
-            return grammar
-
-        # Modern py-tree-sitter (0.22+/0.23+) module-level instantiation: hand
-        # the imported grammar module straight to the two-argument constructor.
-        lang_obj = TSLanguage(grammar, language)
-        _LANGUAGE_CACHE[language] = lang_obj
-        return lang_obj
-    except Exception as exc:
-        raise UniversalParseError(
-            f"Failed to load grammar module {module_name}: {exc}"
-        ) from exc
+    _LANGUAGE_CACHE[language] = lang_obj
+    return lang_obj
 
 def _build_parser(language: str):
     from tree_sitter import Parser
