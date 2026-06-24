@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Union
 
-from core.parser.universal import _load_language, detect_language
+from core.parser.universal import load_language, detect_language
 
 _PathLike = Union[str, Path]
 
@@ -67,7 +67,7 @@ class QueryEngine:
             raise InferenceError(f"No '{name}' query for language {language!r} ({path})")
         from tree_sitter import Query
 
-        query = Query(_load_language(language), path.read_text(encoding="utf-8"))
+        query = Query(load_language(language), path.read_text(encoding="utf-8"))
         self._cache[key] = query
         return query
 
@@ -212,7 +212,7 @@ class InferenceEngine:
         from tree_sitter import Parser
 
         source = path.read_bytes()
-        parser = Parser(_load_language(language))
+        parser = Parser(load_language(language))
         tree = parser.parse(source)
         return tree, source
 
