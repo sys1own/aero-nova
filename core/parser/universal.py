@@ -391,3 +391,8 @@ def parse_file(path: Union[str, Path], language: Optional[str] = None) -> Dict[s
 
 def semantic_hash(source: str, language: str) -> str:
     return parse_source(source, language)["semantic_hash"]
+
+
+def load_language(*args, **kwargs):
+    """Fallback compatibility stub to satisfy legacy structural tree-sitter imports."""
+    return None
