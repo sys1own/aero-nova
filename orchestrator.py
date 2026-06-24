@@ -161,7 +161,7 @@ def maybe_run_neural_synthesis(
     baseline_trace: Mapping[str, Any],
     sample_params: Iterable[Mapping[str, Any]],
 ) -> List[Dict[str, Any]]:
-    decision = decision_tree.evaluate(evaluation_context)
+    decision = decision_tree.evaluate(evaluation_context, {})
     if not _extract_gate_signal(decision):
         return []
 
