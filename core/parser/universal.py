@@ -84,29 +84,15 @@ def _load_language(language: str):
                 ctypes.c_void_p,
             ]
 
-            last_err = None
-            # Different tree-sitter eras expect different capsule names.
-            for capsule_name in [None, b"tree_sitter_language", language.encode("utf-8")]:
-                try:
-                    capsule = ctypes.pythonapi.PyCapsule_New(raw_lang, capsule_name, None)
-                    lang_obj = TSLanguage(capsule, language)
-                    _LANGUAGE_CACHE[language] = lang_obj
-                    return lang_obj
-                except Exception as e:
-                    last_err = e
-                    continue
-            if last_err:
-                raise last_err
+            capsule = ctypes.pythonapi.PyCapsule_New(raw_lang, b"tree_sitter_language", None)
+            lang_obj = TSLanguage(capsule, language)
+            _LANGUAGE_CACHE[language] = lang_obj
+            return lang_obj
 
-        # 3. Fallback A: direct object instantiation.
-        try:
-            lang_obj = TSLanguage(raw_lang, language)
-            _LANGUAGE_CACHE[language] = lang_obj
-            return lang_obj
-        except TypeError:
-            lang_obj = TSLanguage(raw_lang)
-            _LANGUAGE_CACHE[language] = lang_obj
-            return lang_obj
+        # 3. Standard two-argument constructor (string path / object boundary).
+        lang_obj = TSLanguage(raw_lang, language)
+        _LANGUAGE_CACHE[language] = lang_obj
+        return lang_obj
 
     except Exception as exc:
         # Fallback B: path-based binary discovery as an absolute last resort.
