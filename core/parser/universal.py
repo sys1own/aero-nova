@@ -51,31 +51,25 @@ def _load_language(language: str):
         raise UniversalParseError(f"No grammar module registered for language {language!r}")
 
     import ctypes
-    from pathlib import Path
     from tree_sitter import Language as TSLanguage
 
     try:
         grammar = importlib.import_module(module_name)
 
-        # 1. Duck-typing: if the module root itself is already a Language, reuse it.
+        # Case A: the module endpoint is already an instantiated Language object.
         if type(grammar).__name__ == "Language" or hasattr(grammar, "query"):
             _LANGUAGE_CACHE[language] = grammar
             return grammar
 
-        if hasattr(grammar, "language"):
-            raw_lang = grammar.language()
-        else:
-            raise UniversalParseError(
-                f"Grammar module {module_name} lacks 'language' attribute."
-            )
+        raw_lang = grammar.language()
 
+        # Case B: the returned object is already an instantiated Language object.
         if type(raw_lang).__name__ == "Language" or hasattr(raw_lang, "query"):
             _LANGUAGE_CACHE[language] = raw_lang
             return raw_lang
 
-        # 2. Integer pointer conversion: 0.21.x wheels return a raw integer
-        # address from language(); wrap it into a native PyCapsule the
-        # tree_sitter.Language constructor accepts.
+        # Case C: a raw integer address; wrap it into a native PyCapsule pointer
+        # that the tree_sitter.Language constructor accepts.
         if isinstance(raw_lang, int):
             ctypes.pythonapi.PyCapsule_New.restype = ctypes.py_object
             ctypes.pythonapi.PyCapsule_New.argtypes = [
@@ -89,27 +83,12 @@ def _load_language(language: str):
             _LANGUAGE_CACHE[language] = lang_obj
             return lang_obj
 
-        # 3. Standard two-argument constructor (string path / object boundary).
+        # Case D: standard two-argument constructor (string path / object).
         lang_obj = TSLanguage(raw_lang, language)
         _LANGUAGE_CACHE[language] = lang_obj
         return lang_obj
 
     except Exception as exc:
-        # Fallback B: path-based binary discovery as an absolute last resort.
-        try:
-            package_dir = Path(grammar.__file__).parent
-            binary_files = (
-                list(package_dir.glob("*.so"))
-                + list(package_dir.glob("*.pyd"))
-                + list(package_dir.glob("*.dll"))
-            )
-            if binary_files:
-                lang_obj = TSLanguage(str(binary_files[0]), language)
-                _LANGUAGE_CACHE[language] = lang_obj
-                return lang_obj
-        except Exception:
-            pass
-
         raise UniversalParseError(
             f"Failed to load grammar module {module_name}: {exc}"
         ) from exc
