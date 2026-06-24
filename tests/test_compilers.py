@@ -100,6 +100,32 @@ class TestRustCompiler(unittest.TestCase):
             self.assertIn("--release", cmd)
             self.assertEqual(cmd[:2], [binary, "build"])
 
+    def test_build_command_strips_edition_flag(self):
+        rc = RustCompiler()
+        binary = rc.discover()
+        if binary and "cargo" in binary:
+            cmd = rc.build_command(
+                ["src/lib.rs"],
+                flags=["--edition", "2021", "--features", "foo"],
+            )
+            self.assertNotIn("--edition", cmd)
+            self.assertNotIn("2021", cmd)
+            self.assertIn("--features", cmd)
+            self.assertIn("foo", cmd)
+            self.assertEqual(cmd[:2], [binary, "build"])
+
+    def test_build_command_strips_edition_equals_flag(self):
+        rc = RustCompiler()
+        binary = rc.discover()
+        if binary and "cargo" in binary:
+            cmd = rc.build_command(
+                ["src/lib.rs"],
+                flags=["--edition=2021", "--release"],
+            )
+            self.assertNotIn("--edition=2021", cmd)
+            self.assertIn("--release", cmd)
+            self.assertEqual(cmd[:2], [binary, "build"])
+
 
 class TestPythonRuntime(unittest.TestCase):
     def test_discover_finds_python(self):

@@ -243,6 +243,28 @@ class CppCompiler(CompilerBackend):
 # ---------------------------------------------------------------------------
 
 
+def _cargo_build_flags(flags: Sequence[str]) -> List[str]:
+    """Return *flags* with the edition argument stripped.
+
+    ``--edition`` is a manifest / rustc-level setting; it is not accepted by
+    ``cargo build`` and must be kept inside ``Cargo.toml``. Handles both
+    ``--edition 2021`` and ``--edition=2021`` forms.
+    """
+    result: List[str] = []
+    iterator = iter(flags)
+    for flag in iterator:
+        if flag == "--edition":
+            try:
+                next(iterator)
+            except StopIteration:
+                pass
+            continue
+        if flag.startswith("--edition="):
+            continue
+        result.append(flag)
+    return result
+
+
 class RustCompiler(CompilerBackend):
     """Rust backend that respects user manifests and supports subdir crates.
 
@@ -276,7 +298,7 @@ class RustCompiler(CompilerBackend):
     ) -> List[str]:
         options = options or {}
         binary = self.discover() or "cargo"
-        if os.path.basename(binary) == "cargo":
+        if Path(binary).stem.lower() == "cargo":
             cmd: List[str] = [binary, "build"]
             manifest_path = options.get("manifest_path")
             if manifest_path:
@@ -284,7 +306,10 @@ class RustCompiler(CompilerBackend):
             if options.get("release") or "--release" in flags:
                 cmd.append("--release")
             # Remaining flags are cargo-level flags (e.g. --features ...).
-            cmd.extend(f for f in flags if f != "--release")
+            # The edition profile belongs in Cargo.toml, not on the cargo CLI,
+            # so strip any --edition argument (and its value) that may have
+            # leaked in from blueprint flags.
+            cmd.extend(_cargo_build_flags(flags))
             return cmd
         # rustc fallback (no manifest / cargo): compile the sources directly.
         cmd = [binary]
@@ -315,7 +340,7 @@ class RustCompiler(CompilerBackend):
             )
 
         # Without cargo we cannot honour manifests; fall back to plain rustc.
-        if os.path.basename(binary) != "cargo":
+        if Path(binary).stem.lower() != "cargo":
             return super().compile(target_name, sources, output, flags, defines, workdir, options)
 
         from src.build.cargo_manifest import extract_cargo_options, prepare_crate
